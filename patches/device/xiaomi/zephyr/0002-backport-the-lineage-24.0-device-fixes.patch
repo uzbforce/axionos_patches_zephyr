@@ -1,0 +1,1323 @@
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 7e8a3dc..3a15db2 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -32,6 +32,11 @@ ALLOW_MISSING_DEPENDENCIES                   := true
+ # device is never complete on the first boot.
+ SELINUX_IGNORE_NEVERALLOWS                   := true
+ 
++# AxionOS: build no in-tree Axion kernel modules. They are compiled against
++# TARGET_KERNEL_SOURCE and expect their trace hooks in the running Image; the
++# stock prebuilt kernel has none of them, so the modules would be useless.
++TARGET_SHIPS_AXION_KERNEL_MODULES := false
++
+ # ---------------------------------------------------------------------------
+ # Architecture
+ # ---------------------------------------------------------------------------
+@@ -534,10 +539,13 @@ AUDIO_FEATURE_ENABLED_HW_ACCELERATED_EFFECTS   := true
+ AUDIO_FEATURE_ENABLED_EXTENDED_COMPRESS_FORMAT := true
+ 
+ # Double-tap-to-wake is implemented in the power HAL extension (power/power-mode.cpp).
+-# The hook is consumed by the QTI power HAL; it is not part of AOSP's example HAL,
+-# so confirm it is honoured once hardware/qcom-caf/sm6225 is in place.
+-TARGET_POWERHAL_MODE_EXT := $(DEVICE_PATH)/power/power-mode.cpp
+-TARGET_TAP_TO_WAKE       := "/proc/tp_gesture"
++# The QTI power HAL only links that extension through its soong-config variable:
++# TARGET_POWERHAL_MODE_EXT is a Lineage tree variable that nothing in
++# vendor/qcom/opensource/power reads, so the extension was never wired in and
++# DT2W silently did nothing. The panel is a Focaltech FT3683G: it has no
++# in_wakeup_gesture_mode node, so TARGET_TAP_TO_WAKE cannot work either. The
++# extension sends the EV_SYN/SYN_CONFIG event and arms touch mode 14 instead.
++$(call soong_config_set,qtipower,mode_ext_lib,//device/xiaomi/zephyr:libperfmgr-ext-xiaomi)
+ 
+ ENABLE_VENDOR_RIL_SERVICE := true
+ 
+diff --git a/configs/idc/fts_ts.idc b/configs/idc/fts_ts.idc
+new file mode 100644
+index 0000000..d546653
+--- /dev/null
++++ b/configs/idc/fts_ts.idc
+@@ -0,0 +1,19 @@
++#
++# Focaltech FT3683G touchscreen (fts_ts)
++#
++# Keep the touch device enabled while the display viewport is inactive and let
++# its wakeup gestures wake the AP. Without these two switches InputReader
++# disables fts_ts as soon as the panel leaves DOZE, which also stops DT2W and
++# the raw FOD touch stream.
++#
++
++device.internal = 1
++
++touch.deviceType = touchScreen
++touch.orientationAware = 1
++touch.wake = 1
++touch.enableForInactiveViewport = 1
++
++# InputDevice.mIsWaking comes from device.wake, not touch.wake. Without this
++# the touch mapper can see the gesture but InputReader will not request a wake.
++device.wake = 1
+diff --git a/configs/properties/vendor.prop b/configs/properties/vendor.prop
+index 52d6ede..a2288da 100644
+--- a/configs/properties/vendor.prop
++++ b/configs/properties/vendor.prop
+@@ -276,6 +276,11 @@ ro.surface_flinger.force_hwc_copy_for_virtual_displays=true
+ ro.surface_flinger.max_virtual_display_dimension=4096
+ ro.surface_flinger.game_default_frame_rate_override=60
+ ro.surface_flinger.max_frame_buffer_acquired_buffers=3
++# Cross-window blur is handled by RenderEngine on the Adreno path. Without this
++# property the framework marks blur unsupported (BlurUtils reports
++# supportsBlursOnWindows=false) and Settings hides the blur toggles entirely.
++# Blur itself stays off by default; this only makes the option available.
++ro.surface_flinger.supports_background_blur=1
+ debug.sf.hw=0
+ debug.sf.enable_hwc_vds=0
+ debug.sf.latch_unsignaled=1
+diff --git a/device.mk b/device.mk
+index e826802..186e335 100644
+--- a/device.mk
++++ b/device.mk
+@@ -18,8 +18,11 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/generic_ramdisk.mk)
+ $(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota/android_t_baseline.mk)
+ PRODUCT_VIRTUAL_AB_COMPRESSION_METHOD := gz
+ 
+-# Dalvik heap for 6 GB of RAM
+-$(call inherit-product, frameworks/native/build/phone-xhdpi-6144-dalvik-heap.mk)
++# Dalvik heap for 4 GB of RAM. The booted device reports MemTotal 3,719,172 kB
++# (~3.7 GiB), but the tree inherited the 6 GB table, which sets
++# heapgrowthlimit=256m and heapmaxfree=32m. Use the 4 GB table (192m/16m) so
++# app heaps target the RAM this SKU actually has; heapsize stays 512m.
++$(call inherit-product, frameworks/native/build/phone-xhdpi-4096-dalvik-heap.mk)
+ 
+ # Proprietary vendor repo (generated from proprietary-files.txt)
+ $(call inherit-product, vendor/xiaomi/zephyr/zephyr-vendor.mk)
+@@ -73,8 +76,8 @@ PRODUCT_SOONG_NAMESPACES += \
+ # This tree carries its own (empty) soong_namespace in Android.bp, so every
+ # module defined under it is invisible to the root namespace until the
+ # directory is imported. Without this line PRODUCT_PACKAGES entries naming
+-# device-tree modules -- the RROs, libudfpshandler
+-# -- are silently skipped rather than failing the build, which is why the
++# device-tree modules -- the RROs -- are silently skipped rather than failing
++# the build, which is why the
+ # fence shim never reached /vendor/lib64 even though the C2 component store
+ # blob requires it.
+ PRODUCT_SOONG_NAMESPACES += device/xiaomi/zephyr
+@@ -304,10 +307,14 @@ PRODUCT_PACKAGES += \
+ # module of the same name. Building it also keeps it in step with libdrm.
+ 
+ # ---------------------------------------------------------------------------
+-# Fingerprint — Goodix FOD, HAL is a vendor prebuilt
++# Fingerprint — Goodix FOD
++#
++# AxionOS' hardware/lineage/interfaces fork carries the AIDL fingerprint
++# service and its UDFPS press/release handling directly; the separate
++# libudfpshandler module Lineage 23.2 used here no longer exists in that tree,
++# and SystemUI gets the sensor geometry from config_udfps_sensor_props
++# (overlay/FrameworksResCommon).
+ # ---------------------------------------------------------------------------
+-PRODUCT_PACKAGES += \
+-    libudfpshandler
+ 
+ # ---------------------------------------------------------------------------
+ # Gatekeeper / keymaster / keymint
+@@ -435,7 +442,18 @@ PRODUCT_PACKAGES += \
+     android.frameworks.sensorservice@1.0.vendor \
+     android.hardware.sensors-service.xiaomi-multihal \
+     libsensorndkbridge \
+-    sensors.xiaomi.v2
++    sensors.xiaomi.v2 \
++    sensors.xiaomi.zephyr.udfps
++
++# The multi-HAL loads its sub-HALs from hals.conf. The stock firmware's copy
++# only names the SSC and touch sub-HALs, so the UDFPS sub-HAL above would be
++# installed but never loaded: the framework would then never see the
++# org.lineageos.sensor.udfps trigger and screen-off fingerprint would wait
++# forever. The third line lives in the vendor repo's
++# proprietary/vendor/etc/sensors/hals.conf (see the vendor patch in
++# axionos_patches_zephyr); it cannot be overridden from product makefiles
++# because inherit-product is deferred, so a PRODUCT_COPY_FILES replacement here
++# is silently discarded in favour of the vendor copy.
+ 
+ # ---------------------------------------------------------------------------
+ # Thermal
+@@ -519,6 +537,15 @@ PRODUCT_PACKAGES += \
+     android.hardware.fastboot-service.example_recovery \
+     fastbootd
+ 
++# Recovery does not mount vendor_dlkm, so the touchscreen modules are staged in
++# the recovery ramdisk and loaded by init.qcom.recovery.rc. Without them
++# recovery has no touch input. They come from the generated prebuilt kernel
++# tree rather than being committed here, so the device repo stays text-only.
++PRODUCT_COPY_FILES += \
++    $(LOCAL_PATH)/../zephyr-kernel/vendor_dlkm/xiaomi_tp.ko:$(TARGET_COPY_OUT_RECOVERY)/root/vendor_dlkm/lib/modules/xiaomi_tp.ko \
++    $(LOCAL_PATH)/../zephyr-kernel/vendor_dlkm/lct_tp.ko:$(TARGET_COPY_OUT_RECOVERY)/root/vendor_dlkm/lib/modules/lct_tp.ko \
++    $(LOCAL_PATH)/../zephyr-kernel/vendor_dlkm/ft3683g_spi.ko:$(TARGET_COPY_OUT_RECOVERY)/root/vendor_dlkm/lib/modules/ft3683g_spi.ko
++
+ # ---------------------------------------------------------------------------
+ # Uprev shims required by the vendor blobs on this platform
+ # ---------------------------------------------------------------------------
+@@ -600,7 +627,8 @@ PRODUCT_PACKAGES += \
+ # ---------------------------------------------------------------------------
+ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/configs/idc/uinput-goodix.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/uinput-goodix.idc \
+-    $(LOCAL_PATH)/configs/idc/uinput-fpc.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/uinput-fpc.idc
++    $(LOCAL_PATH)/configs/idc/uinput-fpc.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/uinput-fpc.idc \
++    $(LOCAL_PATH)/configs/idc/fts_ts.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/fts_ts.idc
+ 
+ # ---------------------------------------------------------------------------
+ # Fingerprint
+diff --git a/lineage_zephyr.mk b/lineage_zephyr.mk
+index 9d07081..a1c2b9b 100644
+--- a/lineage_zephyr.mk
++++ b/lineage_zephyr.mk
+@@ -25,17 +25,46 @@ ifneq ($(TARGET_BUILD_VARIANT),user)
+ WITH_ADB_INSECURE := true
+ endif
+ 
+-# Inherit from LineageOS common configuration
++# ---------------------------------------------------------------------------
++# AxionOS device configuration
++#
++# These are read while the common config below is inherited (flags.mk,
++# board/common.mk and version.mk), so they have to be set first.
++# ---------------------------------------------------------------------------
++AXION_MAINTAINER := uzbforce
++AXION_PROCESSOR  := Snapdragon_6s_Gen2
++
++AXION_CAMERA_REAR_INFO  := 50
++AXION_CAMERA_FRONT_INFO := 16
++
++# The panel has the local-HBM switch the FOD blob drives; the Goodix HAL arms
++# it through the Xiaomi display-feature daemon (see the FOD patch in
++# axionos_patches_zephyr). Expose the same switch to AxionParts.
++HBM_SUPPORTED := true
++HBM_NODE      := /sys/class/backlight/panel0-backlight/hbm_mode
++
++# Double-tap-to-wake is implemented by the QTI power HAL extension
++# (power/power-mode.cpp, TARGET_TAP_TO_WAKE below); it does not use Axion's
++# doze pulse helpers.
++TARGET_NEEDS_DOZE_FIX := false
++
++# The kernel is the stock prebuilt: no in-tree Axion kernel modules can be
++# loaded into it, and there is no ax_kernel_manager.xml for this device.
++TARGET_SHIPS_AXION_KERNEL_MODULES := false
++TARGET_SUPPORTS_KERNEL_MANAGER    := false
++
++# Keep libperfmgr enabled; set TARGET_DISABLES_LIBPERF := true to fall back.
++TARGET_DISABLES_LIBPERF := false
++
++# No AxionFX on the first bring-up build.
++TARGET_INCLUDE_AXFX := false
++
++# Inherit from LineageOS common configuration (AxionOS' base)
+ $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
+ 
+ # Inherit the hardware configuration for the actual device
+ $(call inherit-product, device/xiaomi/zephyr/device.mk)
+ 
+-# Google apps. MindTheGapps is the package the LineageOS wiki points Android 16
+-# users at; vendor/gapps is the same project's inline-build tree, so the OTA
+-# ships GMS/Play Store/SetupWizard instead of asking for a separate sideload.
+-$(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)
+-
+ # Signing keys, when present
+ -include vendor/lineage-priv/keys/keys.mk
+ 
+diff --git a/overlay/FrameworksResCommon/res/values/config.xml b/overlay/FrameworksResCommon/res/values/config.xml
+index 42d7287..a2758a5 100644
+--- a/overlay/FrameworksResCommon/res/values/config.xml
++++ b/overlay/FrameworksResCommon/res/values/config.xml
+@@ -235,6 +235,11 @@
+     <bool name="config_device_wfc_ims_available">true</bool>
+     <bool name="config_dozeAlwaysOnDisplayAvailable">true</bool>
+     <bool name="config_dozeAlwaysOnEnabled">false</bool>
++    <!-- The touch controller supports double-tap wake independently of AOD.
++         PowerManagerService only reads Settings.Secure.DOUBLE_TAP_TO_WAKE and
++         sends Mode.DOUBLE_TAP_TO_WAKE to the power HAL when this is true; the
++         Settings display switch is gated on the same resource. -->
++    <bool name="config_supportDoubleTapWake">true</bool>
+     <bool name="config_enableMultiUserUI">true</bool>
+     <bool name="config_enable_iwlan_handover_policy">false</bool>
+     <bool name="config_enhanced_iwlan_handover_check">false</bool>
+@@ -277,6 +282,21 @@
+         <item>89</item>
+     </integer-array>
+ 
++    <!-- Let the fingerprint HAL authenticate while the display is off. This is
++         the availability gate for the AOSP/Lineage "Unlock when screen is off"
++         toggle in Settings > Security > Fingerprint; it stays user-controlled
++         and is only the default for a fresh install. -->
++    <bool name="config_screen_off_udfps_enabled">true</bool>
++    <bool name="config_screen_off_udfps_default_on">true</bool>
++
++    <!-- The vendor SSC AOD sensor is a special-trigger sensor, which AOSP's
++         requestTriggerSensor() rejects. The device-owned sensors sub-HAL
++         exposes a normal one-shot wakeup sensor instead and arms the touch
++         panel's FOD mode while Doze has it active. It reports only a trigger
++         value, so the framework fills in the fixed UDFPS centre from
++         config_udfps_sensor_props. -->
++    <string name="config_dozeUdfpsLongPressSensorType" translatable="false">org.lineageos.sensor.udfps</string>
++
+     <string name="config_dozeComponent" translatable="false">com.android.systemui/com.android.systemui.doze.DozeService</string>
+     <string name="config_mms_user_agent" translatable="false">Android-Mms/2.0</string>
+     <string name="config_mms_user_agent_profile_url" translatable="false">http://www.google.com/oha/rdf/ua-profile-kila.xml</string>
+diff --git a/overlay/SystemUIResCommon/res/values/dimens.xml b/overlay/SystemUIResCommon/res/values/dimens.xml
+new file mode 100644
+index 0000000..a4991fb
+--- /dev/null
++++ b/overlay/SystemUIResCommon/res/values/dimens.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <!-- Match the display's rounded corner radius (54.86dp / 144px at 420dpi)
++         so the sheet's top corners have the same roundness as the screen. -->
++    <dimen name="biometric_dialog_corner_size">54.86dp</dimen>
++</resources>
+diff --git a/power/power-mode.cpp b/power/power-mode.cpp
+index df35293..0b76fbf 100644
+--- a/power/power-mode.cpp
++++ b/power/power-mode.cpp
+@@ -18,10 +18,12 @@
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
+ 
++#include <array>
+ #include <dirent.h>
+ #include <fcntl.h>
+ #include <linux/input.h>
+ #include <string.h>
++#include <sys/ioctl.h>
+ #include <unistd.h>
+ 
+ namespace {
+@@ -42,9 +44,10 @@ int open_ts_input() {
+ 
+                 fd = open(absolute_path, O_RDWR);
+                 if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), &name) > 0) {
+-                    // fts = FocalTech, the rest cover Synaptics TCM, which is
+-                    // the primary controller on zephyr (see p19a DTBs).
+-                    if (strcmp(name, "fts") == 0 || strcmp(name, "goodix_ts") == 0 ||
++                    // fts_ts is the Focaltech FT3683G input device on zephyr.
++                    // Keep the other names for the shared Lineage extension.
++                    if (strcmp(name, "fts") == 0 || strcmp(name, "fts_ts") == 0 ||
++                            strcmp(name, "goodix_ts") == 0 ||
+                             strcmp(name, "NVTCapacitiveTouchScreen") == 0 ||
+                             strcmp(name, "synaptics_tcm") == 0 ||
+                             strcmp(name, "Synaptics TCM touchscreen") == 0)
+@@ -61,14 +64,44 @@ int open_ts_input() {
+ 
+     return fd;
+ }
++
++// The touchfeature HAL talks to the xiaomi_tp driver through this node. Its
++// SET_CUR_VALUE ioctl takes a 1 KB int buffer whose payload is [mode, value].
++// The kernel log labels the first field touchId, but fts_set_cur_value() gets
++// buf[0] as the mode and buf[1] as the value. Mode 14 is
++// Touch_Doubletap_Mode; without it fts_ts_suspend() computes gesture_support=0
++// and the controller stops reporting double taps.
++static constexpr int kTouchModeDoubletap = 14;
++static constexpr unsigned long kTouchSetCurValue = 0;
++
++bool set_touch_mode(int mode, int value) {
++    int fd = open("/dev/xiaomi-touch", O_RDWR | O_CLOEXEC);
++    if (fd == -1) {
++        PLOG(ERROR) << "Failed to open /dev/xiaomi-touch";
++        return false;
++    }
++
++    std::array<int, 256> request{};
++    request[0] = mode;
++    request[1] = value;
++
++    int rc = ioctl(fd, kTouchSetCurValue, request.data());
++    close(fd);
++    if (rc == -1) {
++        PLOG(ERROR) << "Failed to set touch mode " << mode << " to " << value;
++        return false;
++    }
++
++    LOG(INFO) << "Touch mode " << mode << " set to " << value;
++    return true;
++}
+ }  // anonymous namespace
+ 
+ namespace aidl {
+-namespace google {
++namespace android {
+ namespace hardware {
+ namespace power {
+ namespace impl {
+-namespace pixel {
+ 
+ static constexpr int kInputEventWakeupModeOff = 4;
+ static constexpr int kInputEventWakeupModeOn = 5;
+@@ -88,28 +121,37 @@ bool isDeviceSpecificModeSupported(Mode type, bool* _aidl_return) {
+ bool setDeviceSpecificMode(Mode type, bool enabled) {
+     switch (type) {
+         case Mode::DOUBLE_TAP_TO_WAKE: {
++            // Arm the controller's own double-tap gesture before writing the
++            // input event. SYN_CONFIG alone only updates the LCT gesture
++            // bitmask; it does not set doubletap_status.
++            bool touch_mode_ok = set_touch_mode(kTouchModeDoubletap, enabled);
++
+             int fd = open_ts_input();
+             if (fd == -1) {
+                 LOG(WARNING)
+                     << "DT2W won't work because no supported touchscreen input devices were found";
+                 return false;
+             }
+-            struct input_event ev;
++            struct input_event ev = {};
+             ev.type = EV_SYN;
+             ev.code = SYN_CONFIG;
+             ev.value = enabled ? kInputEventWakeupModeOn : kInputEventWakeupModeOff;
+-            write(fd, &ev, sizeof(ev));
++            ssize_t written = write(fd, &ev, sizeof(ev));
+             close(fd);
+-            return true;
++            if (written != sizeof(ev)) {
++                PLOG(ERROR) << "Failed to write DT2W input event";
++                return false;
++            }
++            LOG(INFO) << "DT2W " << (enabled ? "enabled" : "disabled");
++            return touch_mode_ok;
+         }
+         default:
+             return false;
+     }
+ }
+ 
+-}  // namespace pixel
+ }  // namespace impl
+ }  // namespace power
+ }  // namespace hardware
+-}  // namespace google
++}  // namespace android
+ }  // namespace aidl
+diff --git a/recovery/root/system/etc/init/init.qcom.recovery.rc b/recovery/root/system/etc/init/init.qcom.recovery.rc
+index 5a2e24e..3554f1d 100644
+--- a/recovery/root/system/etc/init/init.qcom.recovery.rc
++++ b/recovery/root/system/etc/init/init.qcom.recovery.rc
+@@ -40,7 +40,13 @@
+ #   - /dev/block/bootdevice: the device fstab uses it for misc, data, persist,
+ #     modem, dsp and bluetooth, and recovery's bootloader-control-block code
+ #     reads the /misc entry from that fstab. If the link is missing, recovery
+-#     cannot clear the BCB and the bootloader keeps restarting recovery.
++#     cannot clear the BCB and the bootloader keeps restarting recovery;
++#
++#   - touch: ft3683g_spi and its dependencies are staged in the recovery
++#     ramdisk at /vendor_dlkm/lib/modules, because recovery does not mount the
++#     vendor_dlkm partition. They are loaded in the on fs action below.
++#     Loading ft3683g_spi from modules.load.recovery probes before its
++#     dependencies are loaded and panics the kernel.
+ 
+ on init
+     write /sys/class/backlight/panel0-backlight/brightness 200
+@@ -57,6 +63,17 @@ on fs
+     wait /dev/block/platform/soc/${ro.boot.bootdevice}
+     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
+ 
++    # These three modules are staged in the recovery ramdisk at
++    # /vendor_dlkm/lib/modules: recovery does not mount vendor_dlkm, so the
++    # stock vendor_dlkm paths do not exist here. xiaomi_tp needs miev and
++    # ft3683g_spi needs xiaomi_tp + lct_tp; the other dependencies
++    # (hardware_info, lx_charger_class, panel_event_notifier, spi-msm-geni,
++    # msm_drm) are already in modules.load.recovery.
++    wait /vendor_dlkm/lib/modules/ft3683g_spi.ko
++    insmod /vendor_dlkm/lib/modules/xiaomi_tp.ko
++    insmod /vendor_dlkm/lib/modules/lct_tp.ko
++    insmod /vendor_dlkm/lib/modules/ft3683g_spi.ko
++
+ # update_engine_sideload looks up android.hardware.boot.IBootControl through
+ # servicemanager, while the vendor only ships the HIDL 1.2 service and recovery
+ # has no hwservicemanager. This is the QTI AIDL service built for recovery; it
+diff --git a/rootdir/etc/fstab.emmc b/rootdir/etc/fstab.emmc
+index 35907b7..e699e55 100644
+--- a/rootdir/etc/fstab.emmc
++++ b/rootdir/etc/fstab.emmc
+@@ -44,7 +44,7 @@ system                                                  /system
+ system_ext                                              /system_ext               ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ vendor                                                  /vendor                   ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+ vendor_dlkm                                             /vendor_dlkm              ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+-system_dlkm                                             /system_dlkm              ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++system_dlkm                                             /system_dlkm              ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ odm                                                     /odm                      ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+ product                                                 /product                  ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ #/dev/block/bootdevice/by-name/system                    /                      ext4    ro,barrier=1                                         wait,slotselect,avb
+diff --git a/rootdir/etc/fstab.qcom b/rootdir/etc/fstab.qcom
+index 273eff9..b1bccdf 100644
+--- a/rootdir/etc/fstab.qcom
++++ b/rootdir/etc/fstab.qcom
+@@ -13,8 +13,8 @@ vendor                                                  /vendor
+ vendor                                                  /vendor                     ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+ vendor_dlkm                                             /vendor_dlkm                erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ vendor_dlkm                                             /vendor_dlkm                ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+-system_dlkm                                             /system_dlkm                erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+-system_dlkm                                             /system_dlkm                ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++system_dlkm                                             /system_dlkm                erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system_dlkm                                             /system_dlkm                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ odm                                                     /odm                        erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ odm                                                     /odm                        ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+ product                                                 /product                    erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+diff --git a/rootdir/etc/init/hw/init.target.rc b/rootdir/etc/init/hw/init.target.rc
+index f07c70a..c5bfa0a 100644
+--- a/rootdir/etc/init/hw/init.target.rc
++++ b/rootdir/etc/init/hw/init.target.rc
+@@ -51,7 +51,6 @@ on init
+     wait /dev/block/platform/soc/${ro.boot.bootdevice}
+     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
+     start vendor.qseecomd
+-    start keymaster-4-0
+     # Start vold early, as the stock vendor init does. vold waits for /data
+     # itself before creating the emulated volume, so starting it here lets
+     # StorageManagerService find and mount /storage/emulated/0 at boot.
+@@ -81,13 +80,20 @@ on post-fs
+     restorecon /dev/miev
+ on late-fs
+     wait_for_prop hwservicemanager.ready true
+-    exec_start wait_for_keymaster
++    # wait_for_keymaster is not built here and keymaster-4-0 is not a service on
++    # this vendor (keymint does that job), so the old pair only logged errors and
++    # never started the early HAL class. Start that class at late-fs, as AOSP
++    # does; keymint then starts about 4 s earlier than waiting for vendor init.
++    class_start early_hal
+     mount_all --late
+ 
+ on post-fs-data
+     mkdir /vendor/data/tombstones 0771 system system
+     #add for wifi 9434 log
+     mkdir /data/vendor/wlan_logs 0770 system wifi
++    # QCOM labels /data/vendor/wifi/wlan_logs; this device uses the direct
++    # path, so apply the same label here before cnss_diag starts.
++    restorecon_recursive /data/vendor/wlan_logs
+     # Enable WLAN cold boot calibration
+     write /sys/kernel/cnss/fs_ready 1
+ 
+diff --git a/sensors/udfps/Android.bp b/sensors/udfps/Android.bp
+new file mode 100644
+index 0000000..6861900
+--- /dev/null
++++ b/sensors/udfps/Android.bp
+@@ -0,0 +1,27 @@
++//
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++//
++
++cc_library_shared {
++    name: "sensors.xiaomi.zephyr.udfps",
++    defaults: ["hidl_defaults"],
++    vendor: true,
++    srcs: [
++        "UdfpsSubHal.cpp",
++    ],
++    shared_libs: [
++        "android.hardware.sensors@1.0",
++        "android.hardware.sensors@2.0",
++        "android.hardware.sensors@2.1",
++        "android.hardware.sensors@2.0-ScopedWakelock",
++        "libbase",
++        "libhidlbase",
++        "liblog",
++        "libutils",
++    ],
++    static_libs: [
++        "android.hardware.sensors@2.X-multihal",
++    ],
++    cpp_std: "c++20",
++}
+diff --git a/sensors/udfps/UdfpsSubHal.cpp b/sensors/udfps/UdfpsSubHal.cpp
+new file mode 100644
+index 0000000..faf3b44
+--- /dev/null
++++ b/sensors/udfps/UdfpsSubHal.cpp
+@@ -0,0 +1,333 @@
++/*
++ * SPDX-FileCopyrightText: The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#define LOG_TAG "sensors.udfps"
++
++#include <V2_1/SubHal.h>
++
++#include <fcntl.h>
++#include <log/log.h>
++#include <sys/ioctl.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <atomic>
++#include <cerrno>
++#include <chrono>
++#include <condition_variable>
++#include <cstdio>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace android {
++namespace hardware {
++namespace sensors {
++namespace V2_1 {
++namespace implementation {
++
++namespace {
++
++constexpr int32_t kSensorHandle = 1;
++constexpr int32_t kSensorType = static_cast<int32_t>(SensorType::DEVICE_PRIVATE_BASE) + 3;
++constexpr char kSensorStringType[] = "org.lineageos.sensor.udfps";
++constexpr char kTouchDevice[] = "/dev/xiaomi-touch";
++constexpr char kFodPressPath[] = "/sys/class/touch/touch_dev/fod_press_status";
++constexpr int kTouchModeFod = 10;
++constexpr int kTouchFodArmed = 3;
++constexpr int kTouchFodReleased = 0;
++constexpr int kTouchIoctlSetMode = 0x5400;
++
++// The framework deactivates the one-shot sensor as soon as it receives the
++// trigger, but the touch panel and fingerprint HAL still need FOD mode while
++// the authentication runs. Keep it armed through the 1 s synthetic AOD
++// finger-up, then release it.
++constexpr auto kTouchReleaseDelay = std::chrono::milliseconds(1500);
++
++using ::android::hardware::Void;
++using ::android::hardware::sensors::V1_0::OperationMode;
++using ::android::hardware::sensors::V1_0::RateLevel;
++using ::android::hardware::sensors::V1_0::Result;
++using ::android::hardware::sensors::V1_0::SensorFlagBits;
++using ::android::hardware::sensors::V1_0::SharedMemInfo;
++using ::android::hardware::sensors::V2_1::Event;
++using ::android::hardware::sensors::V2_1::SensorInfo;
++
++bool setTouchMode(int value) {
++    int fd = open(kTouchDevice, O_RDWR | O_CLOEXEC);
++    if (fd < 0) {
++        ALOGE("cannot open %s: %s", kTouchDevice, strerror(errno));
++        return false;
++    }
++
++    int arg[2] = {kTouchModeFod, value};
++    int rc = ioctl(fd, kTouchIoctlSetMode, arg);
++    if (rc < 0) {
++        ALOGE("touch mode %d=%d failed: %s", kTouchModeFod, value, strerror(errno));
++    }
++    close(fd);
++    return rc == 0;
++}
++
++int64_t elapsedRealtimeNano() {
++    struct timespec ts = {};
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
++}
++
++}  // namespace
++
++class UdfpsSubHal : public ISensorsSubHal {
++  public:
++    ~UdfpsSubHal() {
++        {
++            std::lock_guard<std::mutex> lock(mLock);
++            mStop = true;
++            mActive = false;
++        }
++        mCv.notify_all();
++        if (mThread.joinable()) {
++            mThread.join();
++        }
++        setTouchMode(kTouchFodReleased);
++    }
++
++    Return<Result> setOperationMode(OperationMode mode) override {
++        return mode == OperationMode::NORMAL ? Result::OK : Result::BAD_VALUE;
++    }
++
++    Return<Result> activate(int32_t sensorHandle, bool enabled) override {
++        if (sensorHandle != kSensorHandle) {
++            return Result::BAD_VALUE;
++        }
++
++        {
++            std::lock_guard<std::mutex> lock(mLock);
++            if (enabled) {
++                if (!mActive) {
++                    mActive = true;
++                    ++mGeneration;
++                }
++            } else {
++                mActive = false;
++            }
++        }
++        mCv.notify_all();
++        return Result::OK;
++    }
++
++    Return<Result> batch(int32_t sensorHandle, int64_t /* samplingPeriodNs */,
++                         int64_t /* maxReportLatencyNs */) override {
++        return sensorHandle == kSensorHandle ? Result::OK : Result::BAD_VALUE;
++    }
++
++    Return<Result> flush(int32_t /* sensorHandle */) override {
++        return Result::INVALID_OPERATION;
++    }
++
++    Return<void> registerDirectChannel(const SharedMemInfo& /* mem */,
++                                       registerDirectChannel_cb callback) override {
++        callback(Result::INVALID_OPERATION, -1);
++        return Void();
++    }
++
++    Return<Result> unregisterDirectChannel(int32_t /* channelHandle */) override {
++        return Result::INVALID_OPERATION;
++    }
++
++    Return<void> configDirectReport(int32_t /* sensorHandle */, int32_t /* channelHandle */,
++                                    RateLevel /* rate */,
++                                    configDirectReport_cb callback) override {
++        callback(Result::INVALID_OPERATION, 0);
++        return Void();
++    }
++
++    Return<void> getSensorsList_2_1(getSensorsList_2_1_cb callback) override {
++        SensorInfo sensor = {};
++        sensor.sensorHandle = kSensorHandle;
++        sensor.name = "UDFPS Sensor";
++        sensor.vendor = "The LineageOS Project";
++        sensor.version = 1;
++        sensor.type = static_cast<SensorType>(kSensorType);
++        sensor.typeAsString = kSensorStringType;
++        sensor.maxRange = 1.0f;
++        sensor.resolution = 1.0f;
++        sensor.power = 0.0f;
++        sensor.minDelay = -1;
++        sensor.fifoReservedEventCount = 0;
++        sensor.fifoMaxEventCount = 0;
++        sensor.requiredPermission = "";
++        sensor.maxDelay = 0;
++        sensor.flags = static_cast<uint32_t>(SensorFlagBits::ONE_SHOT_MODE) |
++                       static_cast<uint32_t>(SensorFlagBits::WAKE_UP);
++
++        callback({sensor});
++        return Void();
++    }
++
++    Return<Result> injectSensorData_2_1(const Event& /* event */) override {
++        return Result::INVALID_OPERATION;
++    }
++
++    Return<void> debug(const hidl_handle& fd, const hidl_vec<hidl_string>& /* args */) override {
++        if (fd.getNativeHandle() == nullptr || fd->numFds < 1) {
++            ALOGE("missing fd for debug");
++            return Void();
++        }
++
++        FILE* out = fdopen(dup(fd->data[0]), "w");
++        if (out != nullptr) {
++            fprintf(out, "UDFPS Sensor handle=%d type=%s active=%d\n", kSensorHandle,
++                    kSensorStringType, mActive.load());
++            fclose(out);
++        }
++        return Void();
++    }
++
++    const std::string getName() override { return "UDFPS-SubHAL"; }
++
++    Return<Result> initialize(const sp<IHalProxyCallback>& callback) override {
++        {
++            std::lock_guard<std::mutex> lock(mLock);
++            mCallback = callback;
++            if (!mThread.joinable()) {
++                mThread = std::thread(&UdfpsSubHal::run, this);
++            }
++        }
++        return Result::OK;
++    }
++
++  private:
++    bool isActive(uint32_t generation) const {
++        return mActive.load() && mGeneration.load() == generation;
++    }
++
++    bool armTouchMode(uint32_t generation) {
++        while (!mStop.load() && isActive(generation)) {
++            if (setTouchMode(kTouchFodArmed)) {
++                return true;
++            }
++            std::this_thread::sleep_for(std::chrono::milliseconds(200));
++        }
++        return false;
++    }
++
++    void releaseTouchModeIfCurrent(uint32_t generation) {
++        if (!mStop.load() && mGeneration.load() == generation && !mActive.load()) {
++            setTouchMode(kTouchFodReleased);
++        }
++    }
++
++    void run() {
++        while (!mStop.load()) {
++            uint32_t generation;
++            {
++                std::unique_lock<std::mutex> lock(mLock);
++                mCv.wait(lock, [this] { return mStop.load() || mActive.load(); });
++                if (mStop.load()) {
++                    break;
++                }
++                generation = mGeneration.load();
++            }
++
++            if (!armTouchMode(generation)) {
++                releaseTouchModeIfCurrent(generation);
++                continue;
++            }
++
++            ALOGI("armed touch FOD mode, waiting for press");
++            int fd = open(kFodPressPath, O_RDONLY | O_CLOEXEC);
++            if (fd < 0) {
++                ALOGE("cannot open %s: %s", kFodPressPath, strerror(errno));
++                releaseTouchModeIfCurrent(generation);
++                continue;
++            }
++
++            bool pressed = false;
++            while (!mStop.load() && isActive(generation)) {
++                char buf[8] = {};
++                lseek(fd, 0, SEEK_SET);
++                int len = read(fd, buf, sizeof(buf) - 1);
++                if (len > 0 && buf[0] == '1') {
++                    if (mCallback == nullptr) {
++                        ALOGE("no sensor callback for UDFPS trigger");
++                        break;
++                    }
++
++                    Event event = {};
++                    event.timestamp = elapsedRealtimeNano();
++                    event.sensorHandle = kSensorHandle;
++                    event.sensorType = static_cast<SensorType>(kSensorType);
++                    event.u.data[0] = 1.0f;
++
++                    auto wakelock = mCallback->createScopedWakelock(true);
++                    mCallback->postEvents({event}, std::move(wakelock));
++                    ALOGI("UDFPS press triggered");
++                    pressed = true;
++                    break;
++                }
++                std::this_thread::sleep_for(std::chrono::milliseconds(50));
++            }
++
++            close(fd);
++
++            if (!pressed) {
++                // The sensor was deactivated before a press; no scan to protect.
++                releaseTouchModeIfCurrent(generation);
++                continue;
++            }
++
++            // Mark the one-shot handled. The framework may already have called
++            // activate(false); in either case no more events are expected for this
++            // generation. Do not release the touch mode until the scan finishes.
++            {
++                std::lock_guard<std::mutex> lock(mLock);
++                if (mGeneration.load() == generation) {
++                    mActive = false;
++                }
++            }
++            mCv.notify_all();
++
++            const auto deadline = std::chrono::steady_clock::now() + kTouchReleaseDelay;
++            {
++                std::unique_lock<std::mutex> lock(mLock);
++                mCv.wait_until(lock, deadline, [this, generation] {
++                    return mStop.load() || mGeneration.load() != generation || mActive.load();
++                });
++            }
++
++            // A new generation means a new activation took ownership of the touch
++            // mode while this scan was winding down; leave it armed for that scan.
++            releaseTouchModeIfCurrent(generation);
++        }
++
++        setTouchMode(kTouchFodReleased);
++    }
++
++    sp<IHalProxyCallback> mCallback;
++    std::mutex mLock;
++    std::condition_variable mCv;
++    std::thread mThread;
++    std::atomic<bool> mActive{false};
++    std::atomic<bool> mStop{false};
++    std::atomic<uint32_t> mGeneration{0};
++};
++
++}  // namespace implementation
++}  // namespace V2_1
++}  // namespace sensors
++}  // namespace hardware
++}  // namespace android
++
++using ::android::hardware::sensors::V2_1::implementation::ISensorsSubHal;
++using ::android::hardware::sensors::V2_1::implementation::UdfpsSubHal;
++
++extern "C" ISensorsSubHal* sensorsHalGetSubHal_2_1(uint32_t* version) {
++    static UdfpsSubHal subHal;
++    *version = SUB_HAL_2_1_VERSION;
++    return &subHal;
++}
+diff --git a/sepolicy/vendor/battery_sysfs_zephyr.te b/sepolicy/vendor/battery_sysfs_zephyr.te
+new file mode 100644
+index 0000000..729fcb0
+--- /dev/null
++++ b/sepolicy/vendor/battery_sysfs_zephyr.te
+@@ -0,0 +1,19 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++
++# The camera provider reads battery temp/capacity while it builds its thermal
++# metadata, and the QTI perf HAL reads battery status every ten seconds for its
++# power hints. Both only traverse the directory today (hal_camera_default.te
++# and hal_perf_default_zephyr.te grant search), so the actual reads are denied
++# and the hints fall back to safe defaults:
++#
++#   avc: denied { read } for comm="camera.provider" name="temp"
++#     scontext=u:r:hal_camera_default:s0
++#     tcontext=u:object_r:sysfs_batteryinfo:s0 tclass=file
++#   avc: denied { read } for comm="lmCoreThread" name="status"
++#     scontext=u:r:vendor_hal_perf_default:s0
++#     tcontext=u:object_r:sysfs_batteryinfo:s0 tclass=file
++allow hal_camera_default sysfs_batteryinfo:file r_file_perms;
++allow vendor_hal_perf_default sysfs_batteryinfo:file r_file_perms;
+diff --git a/sepolicy/vendor/cam_perfopt_zephyr.te b/sepolicy/vendor/cam_perfopt_zephyr.te
+new file mode 100644
+index 0000000..19d7175
+--- /dev/null
++++ b/sepolicy/vendor/cam_perfopt_zephyr.te
+@@ -0,0 +1,20 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++
++# /vendor/bin/init.qti.cam.perfopt.sh is executed by init when the camera
++# provider starts. It shipped as a plain vendor_file, which init is never
++# allowed to execute:
++#
++#   avc: denied { execute } for comm="init" name="init.qti.cam.perfopt.sh"
++#     scontext=u:r:init:s0 tcontext=u:object_r:vendor_file:s0 tclass=file
++#
++# The script is closed source and its full sysfs surface is unknown, so keep the
++# domain permissive: it restores the camera performance knobs without risking a
++# boot-time denial loop.
++type vendor_qti_cam_perfopt, domain;
++type vendor_qti_cam_perfopt_exec, vendor_file_type, exec_type, file_type;
++
++init_daemon_domain(vendor_qti_cam_perfopt)
++permissive vendor_qti_cam_perfopt;
+diff --git a/sepolicy/vendor/file.te b/sepolicy/vendor/file.te
+index 1f2ca8c..2e8170b 100644
+--- a/sepolicy/vendor/file.te
++++ b/sepolicy/vendor/file.te
+@@ -3,6 +3,13 @@
+ # SPDX-License-Identifier: Apache-2.0
+ #
+ 
++# /sys/nfc/chip_name is read by sscrpcd and chowned by init.thn31.nfc.rc, but
++# it sits under the TMS controller's i2c device and has no QCOM genfscon, so it
++# falls back to the generic sysfs label. Give it a narrow type instead of
++# widening either daemon's generic sysfs access; the genfscon is in
++# genfs_contexts.
++type sysfs_zephyr_nfc_chip_name, fs_type, sysfs_type;
++
+ # Goodix keeps its factory calibration in /mnt/vendor/persist/goodix
+ # (gf_cali_persist.so and its backup) and the pointer to the file is handed to
+ # the fingerprint TA. The TEE daemon reads the file on the TA's behalf, so both
+diff --git a/sepolicy/vendor/file_contexts b/sepolicy/vendor/file_contexts
+index 1eaed4b..fb141b1 100644
+--- a/sepolicy/vendor/file_contexts
++++ b/sepolicy/vendor/file_contexts
+@@ -68,3 +68,23 @@
+ # the domain with seclabel, but labeling the binary keeps the normal
+ # init_daemon_domain transition available as well.
+ /(vendor|system/vendor)/bin/hw/vendor\.xiaomi\.hardware\.batteryantiaging-service u:object_r:hal_batteryantiaging_default_exec:s0
++
++# QTI cnss_diag writes WLAN firmware logs under /data/vendor/wlan_logs. QCOM's
++# policy only labels /data/vendor/wifi/wlan_logs, so this path fell back to
++# vendor_data_file and cnss_diag was denied read/write/setattr every few
++# seconds. The init script relabels it at post-fs-data; see
++# init.target.rc and vendor_init_zephyr.te.
++/data/vendor/wlan_logs(/.*)?    u:object_r:vendor_wifi_vendor_log_data_file:s0
++
++# TMS/THN31 NFC controller. init.thn31.nfc.rc waits for /dev/tms_nfc and then
++# chmods/chowns it, but the node had no label and fell back to the generic
++# "device" type. vendor_init may not getattr that type, so `wait` polled a node
++# that already existed and never returned: 494 getattr denials in 13 minutes,
++# and the rest of the block (the /proc/tmsdev and /sys/nfc permissions) never
++# ran. Label it with the platform NFC type; the NFC HAL already owns it.
++/dev/tms_nfc     u:object_r:nfc_device:s0
++
++# Xiaomi's camera perf-optimisation script. init executes it from the camera
++# provider's init sequence; unlabelled it is vendor_file and init may not
++# execute it (avc denied { execute } for name="init.qti.cam.perfopt.sh").
++/(vendor|system/vendor)/bin/init\.qti\.cam\.perfopt\.sh u:object_r:vendor_qti_cam_perfopt_exec:s0
+diff --git a/sepolicy/vendor/genfs_contexts b/sepolicy/vendor/genfs_contexts
+index 5acac45..d65e0ec 100644
+--- a/sepolicy/vendor/genfs_contexts
++++ b/sepolicy/vendor/genfs_contexts
+@@ -66,3 +66,9 @@ genfscon sysfs /devices/platform/soc/soc:vibrator_gpio/leds/vibrator/activate u:
+ genfscon sysfs /devices/platform/soc/soc:vibrator_gpio/leds/vibrator/duration u:object_r:sysfs_leds:s0
+ genfscon sysfs /devices/platform/soc/soc:vibrator_gpio/leds/vibrator/state u:object_r:sysfs_leds:s0
+ genfscon sysfs /devices/platform/soc/soc:vibrator_gpio/leds/vibrator/brightness u:object_r:sysfs_leds:s0
++
++# TMS/THN31 NFC controller attributes. /sys/nfc is a symlink to this i2c
++# device; label only chip_name, which sscrpcd reads and init.thn31.nfc.rc
++# chowns. The rest of the device stays on the generic sysfs label so the NFC
++# driver's other attributes keep their existing access.
++genfscon sysfs /devices/platform/soc/4ac0000.qcom,qupv3_0_geni_se/4a80000.i2c/i2c-0/0-0028/chip_name u:object_r:sysfs_zephyr_nfc_chip_name:s0
+diff --git a/sepolicy/vendor/hal_audio_default_zephyr.te b/sepolicy/vendor/hal_audio_default_zephyr.te
+index 89c05ad..98d16df 100644
+--- a/sepolicy/vendor/hal_audio_default_zephyr.te
++++ b/sepolicy/vendor/hal_audio_default_zephyr.te
+@@ -3,7 +3,8 @@
+ # SPDX-License-Identifier: Apache-2.0
+ #
+ 
+-# The QTI audio HAL's FSMoniter thread walks /sys/class/power_supply and needs
+-# search access to the battery supply directory. It does not read the values;
+-# grant only directory traversal, not file reads.
++# The QTI audio HAL's FSMoniter thread walks /sys/class/power_supply and reads
++# the battery capacity/voltage while monitoring playback. Grant traversal and
++# read-only access to the battery attributes; no writes.
+ allow hal_audio_default sysfs_batteryinfo:dir search;
++allow hal_audio_default sysfs_batteryinfo:file { getattr open read };
+diff --git a/sepolicy/vendor/hal_batteryantiaging.te b/sepolicy/vendor/hal_batteryantiaging.te
+index 61f9b07..006c8d1 100644
+--- a/sepolicy/vendor/hal_batteryantiaging.te
++++ b/sepolicy/vendor/hal_batteryantiaging.te
+@@ -29,3 +29,14 @@ allow hal_batteryantiaging_default sysfs:lnk_file read;
+ 
+ allow hal_batteryantiaging_default proc:dir r_dir_perms;
+ allow hal_batteryantiaging_default proc:file r_file_perms;
++
++# The daemon walks /sys/class/power_supply and reads the battery attributes to
++# track charge cycles and cell health. zephyr labels those nodes
++# sysfs_batteryinfo (genfs_contexts), so the generic sysfs rule above does not
++# cover them: search, and the reads of the values themselves.
++allow hal_batteryantiaging_default sysfs_batteryinfo:dir r_dir_perms;
++allow hal_batteryantiaging_default sysfs_batteryinfo:file r_file_perms;
++
++# It also mirrors its charge-limit decisions into the kernel log for factory
++# diagnostics (write /dev/kmsg). Without this only the kmsg logging is lost.
++allow hal_batteryantiaging_default kmsg_device:chr_file { getattr write };
+diff --git a/sepolicy/vendor/hal_camera_default.te b/sepolicy/vendor/hal_camera_default.te
+index 5e64255..b56abc3 100644
+--- a/sepolicy/vendor/hal_camera_default.te
++++ b/sepolicy/vendor/hal_camera_default.te
+@@ -4,4 +4,10 @@
+ 
+ allow hal_camera_default mnt_vendor_file:dir search;
+ allow hal_camera_default sysfs:file rw_file_perms;
++
++# The camera provider also enumerates /sys/class/power_supply while it builds
++# its tuning metadata. zephyr's battery supply directory carries
++# sysfs_batteryinfo, so the lookup was audited ten times per camera open even
++# though the HAL only wants the directory listing. Traversal only, no reads.
++allow hal_camera_default sysfs_batteryinfo:dir search;
+ allow hal_camera_default vendor_default_prop:property_service set;
+diff --git a/sepolicy/vendor/hal_displayfeature_xiaomi_default.te b/sepolicy/vendor/hal_displayfeature_xiaomi_default.te
+index a4114bc..eae74eb 100644
+--- a/sepolicy/vendor/hal_displayfeature_xiaomi_default.te
++++ b/sepolicy/vendor/hal_displayfeature_xiaomi_default.te
+@@ -48,5 +48,26 @@ binder_call(hal_graphics_composer_default, hal_displayfeature_xiaomi_default)
+ # widen composer access to the rest of the display feature subtree.
+ allow hal_graphics_composer_default sysfs_brightness_clone:file w_file_perms;
+ 
++# The panel backlight is labelled vendor_sysfs_graphics, not the generic sysfs
++# label. The daemon reads and writes the brightness node during FOD and panel
++# feature transitions, and also needs to traverse the backlight class.
++allow hal_displayfeature_xiaomi_default vendor_sysfs_graphics:dir search;
++allow hal_displayfeature_xiaomi_default vendor_sysfs_graphics:file rw_file_perms;
++
++# The daemon opens the hwservicemanager and vendor mpctl property areas during
++# start-up. These are read-only property accesses.
++allow hal_displayfeature_xiaomi_default hwservicemanager_prop:file { getattr open read };
++
++# Start-up property access. The daemon reads the vendor mpctl property area
++# while it initialises its feature table. It is permissive today, so this only
++# silences the boot-time audit lines.
++allow hal_displayfeature_xiaomi_default vendor_mpctl_prop:file r_file_perms;
++
++# The daemon forwards display-feature commands to SDM and to the display color
++# service: FOD/local-HBM and the panel feature table both live behind those
++# binders. Both calls were audited (permissive) on every feature request.
++binder_call(hal_displayfeature_xiaomi_default, hal_graphics_composer_default)
++binder_call(hal_displayfeature_xiaomi_default, vendor_hal_display_color_default)
++
+ # Closed-source panel HAL with an undocumented sysfs surface.
+ permissive hal_displayfeature_xiaomi_default;
+diff --git a/sepolicy/vendor/hal_fingerprint_default.te b/sepolicy/vendor/hal_fingerprint_default.te
+index 674922e..31f1a96 100644
+--- a/sepolicy/vendor/hal_fingerprint_default.te
++++ b/sepolicy/vendor/hal_fingerprint_default.te
+@@ -180,3 +180,8 @@ allow hal_fingerprint_default vendor_displayfeature_device:chr_file rw_file_perm
+ # displayfeature counterpart was already granted; this one was missing.
+ allow hal_fingerprint_default hal_touchfeature_xiaomi_hwservice:hwservice_manager find;
+ binder_call(hal_fingerprint_default, hal_touchfeature_xiaomi_default)
++
++# libmifpext raises the FOD engine thread priority with setpriority(), which was
++# denied because the HAL domain had no sys_nice capability. Grant only that
++# capability; this does not add access to any device or sysfs node.
++allow hal_fingerprint_default self:capability sys_nice;
+diff --git a/sepolicy/vendor/hal_perf_default_zephyr.te b/sepolicy/vendor/hal_perf_default_zephyr.te
+index 44d8f30..1357337 100644
+--- a/sepolicy/vendor/hal_perf_default_zephyr.te
++++ b/sepolicy/vendor/hal_perf_default_zephyr.te
+@@ -8,3 +8,8 @@
+ # genfscon; the stock bengal policy never granted the write, so every boost
+ # produced an AVC denial.
+ allow vendor_hal_perf_default sysfs_thermal:file w_file_perms;
++
++# Its lmCoreThread walks /sys/class/power_supply for the battery node before
++# selecting a perf hint. zephyr labels that directory sysfs_batteryinfo; grant
++# traversal only, the thread does not read the attributes.
++allow vendor_hal_perf_default sysfs_batteryinfo:dir search;
+diff --git a/sepolicy/vendor/hal_power_default.te b/sepolicy/vendor/hal_power_default.te
+new file mode 100644
+index 0000000..5ed2167
+--- /dev/null
++++ b/sepolicy/vendor/hal_power_default.te
+@@ -0,0 +1,20 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++
++# The QTI power HAL handles Mode.DOUBLE_TAP_TO_WAKE through its mode extension:
++# libperfmgr-ext-xiaomi opens the Focaltech input device and writes an
++# EV_SYN/SYN_CONFIG event. It joins the input group in the service rc, and this
++# domain needs access to /dev/input and the event character devices. The sysfs
++# rules are kept for the QTI HAL's other sysfs-backed modes.
++allow hal_power_default input_device:dir r_dir_perms;
++allow hal_power_default input_device:chr_file rw_file_perms;
++
++# The extension also arms the FTS double-tap gesture through the xiaomi_tp
++# command node. SYN_CONFIG alone does not set doubletap_status, so the touch
++# controller still suspends gesture mode with AOD off without this ioctl.
++allow hal_power_default xiaomi_touch_device:chr_file rw_file_perms;
++allow hal_power_default sysfs:dir r_dir_perms;
++allow hal_power_default sysfs:file rw_file_perms;
++allow hal_power_default sysfs:lnk_file r_file_perms;
+diff --git a/sepolicy/vendor/hal_usb_qti_zephyr.te b/sepolicy/vendor/hal_usb_qti_zephyr.te
+index 4a49d70..bbff3ee 100644
+--- a/sepolicy/vendor/hal_usb_qti_zephyr.te
++++ b/sepolicy/vendor/hal_usb_qti_zephyr.te
+@@ -4,5 +4,10 @@
+ #
+ 
+ # The USB QTI HAL probes the display backlight node while enumerating USB
+-# configurations. It only needs to traverse the graphics sysfs directory.
++# configurations and reads the current brightness. It also looks for a `usb`
++# child under the battery supply; this kernel does not create that child, so
++# without search permission the lookup is audited every few seconds before
++# returning ENOENT.
+ allow vendor_hal_usb_qti vendor_sysfs_graphics:dir search;
++allow vendor_hal_usb_qti vendor_sysfs_graphics:file { getattr open read };
++allow vendor_hal_usb_qti sysfs_batteryinfo:dir search;
+diff --git a/sepolicy/vendor/mi_thermald.te b/sepolicy/vendor/mi_thermald.te
+index 66bf4c6..24e0179 100644
+--- a/sepolicy/vendor/mi_thermald.te
++++ b/sepolicy/vendor/mi_thermald.te
+@@ -41,3 +41,31 @@ permissive mi_thermald;
+ # Grant only traversal of the LED class here; the rest of the daemon's broad
+ # access set stays permissive and is deliberately not reconstructed.
+ allow mi_thermald sysfs_leds:dir search;
++
++# It also samples the charger current and both panel brightness nodes while
++# collecting thermal inputs. These were the remaining repeated denials in
++# dmesg (all permissive=1, so they only added audit noise):
++#
++#   avc: denied { search } for name="battery" ...
++#     tcontext=u:object_r:sysfs_batteryinfo:s0 tclass=dir
++#   avc: denied { read } for name="current_now" ...
++#     tcontext=u:object_r:sysfs_batteryinfo:s0 tclass=file
++#   avc: denied { search } for name="backlight" ...
++#     tcontext=u:object_r:vendor_sysfs_graphics:s0 tclass=dir
++#   avc: denied { read } for name="brightness" ...
++#     tcontext=u:object_r:vendor_sysfs_graphics:s0 tclass=file
++#   avc: denied { read } for name="brightness_clone" ...
++#     tcontext=u:object_r:sysfs_brightness_clone:s0 tclass=file
++#
++# Grant only those reads and the directory traversal they need. The daemon is
++# still permissive; this does not hand it write access to the panel.
++allow mi_thermald sysfs_batteryinfo:dir search;
++allow mi_thermald sysfs_batteryinfo:file { getattr open read };
++allow mi_thermald vendor_sysfs_graphics:dir search;
++allow mi_thermald vendor_sysfs_graphics:file { getattr open read };
++allow mi_thermald sysfs_brightness_clone:file { getattr open read };
++
++# It also enumerates /sys/class while selecting the nodes above. This is
++# read-only directory traversal; the domain remains permissive and no writes
++# are granted.
++allow mi_thermald sysfs:dir { getattr open read search };
+diff --git a/sepolicy/vendor/property.te b/sepolicy/vendor/property.te
+new file mode 100644
+index 0000000..1475cf1
+--- /dev/null
++++ b/sepolicy/vendor/property.te
+@@ -0,0 +1,22 @@
++# Xiaomi fingerprint properties. Stock maps persist.vendor.sys.fp.* to
++# vendor_fp_prop; AOSP's default vendor_system_prop mapping makes vendor_init
++# refuse to load the FOD geometry from /vendor/build.prop:
++#
++#   avc: denied { set } for property=persist.vendor.sys.fp.fod.location.X_Y
++#     scontext=u:r:vendor_init:s0 tcontext=u:object_r:vendor_system_prop:s0
++#     tclass=property_service
++type vendor_fp_prop, property_type;
++type vendor_fp_info_prop, property_type;
++
++allow vendor_init vendor_fp_prop:property_service set;
++allow vendor_init vendor_fp_info_prop:property_service set;
++
++get_prop(hal_fingerprint_default, vendor_fp_prop)
++get_prop(hal_fingerprint_default, vendor_fp_info_prop)
++
++# The Goodix HAL publishes persist.vendor.sys.fp.vendor and
++# persist.vendor.sys.fp.bigdata.type after it opens the lower HAL. Those names
++# were remapped from vendor_system_prop to the fingerprint-specific types, so
++# the HAL needs set access in addition to the read access above.
++set_prop(hal_fingerprint_default, vendor_fp_prop)
++set_prop(hal_fingerprint_default, vendor_fp_info_prop)
+diff --git a/sepolicy/vendor/property_contexts b/sepolicy/vendor/property_contexts
+new file mode 100644
+index 0000000..0870152
+--- /dev/null
++++ b/sepolicy/vendor/property_contexts
+@@ -0,0 +1,3 @@
++persist.vendor.sys.fp.        u:object_r:vendor_fp_prop:s0
++persist.vendor.sys.fp.info    u:object_r:vendor_fp_info_prop:s0
++persist.vendor.sys.fp.uid     u:object_r:vendor_fp_info_prop:s0
+diff --git a/sepolicy/vendor/vendor_init_zephyr.te b/sepolicy/vendor/vendor_init_zephyr.te
+new file mode 100644
+index 0000000..3fda0f0
+--- /dev/null
++++ b/sepolicy/vendor/vendor_init_zephyr.te
+@@ -0,0 +1,30 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++
++# /data/vendor/wlan_logs is created by init at post-fs-data, but QCOM's
++# file_contexts only labels /data/vendor/wifi/wlan_logs. Label the actual path
++# and let the post-fs-data restorecon move the existing directory and its logs
++# to vendor_wifi_vendor_log_data_file. Only vendor_init performs this relabel.
++allow vendor_init vendor_data_file:dir { getattr open read search relabelfrom };
++allow vendor_init vendor_data_file:file { getattr relabelfrom };
++allow vendor_init vendor_wifi_vendor_log_data_file:dir { getattr open read search relabelto };
++allow vendor_init vendor_wifi_vendor_log_data_file:file { getattr relabelto };
++
++# /mnt/vendor/persist is mounted with vendor_firmware_file as the default
++# context, so the Goodix calibration files arrive with that label even though
++# their file_contexts entry says vendor_fingerprint_data_file. The fingerprint
++# init script's restorecon_recursive was denied on relabelfrom, leaving the
++# files mislabeled and the TEE unable to read them. Allow vendor_init to
++# perform exactly that firmware -> fingerprint-data relabel.
++allow vendor_init vendor_firmware_file:file { getattr relabelfrom };
++allow vendor_init vendor_fingerprint_data_file:dir { getattr open read search };
++allow vendor_init vendor_fingerprint_data_file:file { getattr relabelto };
++
++# init.thn31.nfc.rc: `wait /dev/tms_nfc`, then chmod/chown, then `wait` and
++# chown /sys/nfc/chip_name. Without getattr the wait never sees the node and
++# the block stalls forever (494 denials in 13 minutes). setattr is the
++# chmod/chown.
++allow vendor_init nfc_device:chr_file { getattr setattr };
++allow vendor_init sysfs_zephyr_nfc_chip_name:file { getattr setattr };
+diff --git a/sepolicy/vendor/vendor_qti_init_shell_zephyr.te b/sepolicy/vendor/vendor_qti_init_shell_zephyr.te
+new file mode 100644
+index 0000000..c35af6c
+--- /dev/null
++++ b/sepolicy/vendor/vendor_qti_init_shell_zephyr.te
+@@ -0,0 +1,24 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++
++# init.qti.chg_policy.sh (vendor_qti_init_shell) chowns the charger and fuel
++# gauge attributes so the charging daemons can read them without root. zephyr's
++# supplies are Xiaomi's lx_chg_manager and the two I2C chargers, labelled
++# sysfs_batteryinfo by genfs_contexts, but the QCOM sm6225 policy only grants
++# the shell read access. 118 setattr denials per boot:
++#
++#   avc: denied { setattr } for comm="chown" name="uevent"
++#     scontext=u:r:vendor_qti_init_shell:s0
++#     tcontext=u:object_r:sysfs_batteryinfo:s0 tclass=file
++allow vendor_qti_init_shell sysfs_batteryinfo:file { getattr setattr };
++
++# Other one-shot boot writes from the same QTI init scripts: memory sleep and
++# page-cluster policy, the QDSS sink selection, and the USB configfs switches.
++# Denied, they only log noise, but the memory knobs are part of QTI's power
++# tuning and cost nothing to restore.
++allow vendor_qti_init_shell sysfs_mem_sleep:file w_file_perms;
++allow vendor_qti_init_shell proc_page_cluster:file w_file_perms;
++allow vendor_qti_init_shell vendor_sysfs_qdss_dev:file w_file_perms;
++allow vendor_qti_init_shell configfs:dir w_dir_perms;
+diff --git a/sepolicy/vendor/vendor_sensors.te b/sepolicy/vendor/vendor_sensors.te
+index e66a0ba..13a75d9 100644
+--- a/sepolicy/vendor/vendor_sensors.te
++++ b/sepolicy/vendor/vendor_sensors.te
+@@ -11,3 +11,22 @@
+ # nodes share proc_tp_proximity_data; see file.te for the denials that repeat
+ # while the proximity sensor is armed.
+ allow vendor_sensors proc_tp_proximity_data:file rw_file_perms;
++
++# The UDFPS sensors sub-HAL arms the touch controller's FOD mode through the
++# xiaomi_tp command node, then watches the driver's press flag to deliver the
++# one-shot doze trigger. The touch feature service normally owns this node;
++# the sub-HAL runs in the sensors multihal process, which is also uid system,
++# so it only needs the matching SELinux access and the generic sysfs walk.
++allow hal_sensors_default xiaomi_touch_device:chr_file rw_file_perms;
++allow hal_sensors_default sysfs:dir r_dir_perms;
++allow hal_sensors_default sysfs:file r_file_perms;
++
++# sscrpcd probes the NFC controller's chip_name while it builds its sensor
++# list; the node has its own type now (see file.te/genfs_contexts).
++allow vendor_sensors sysfs_zephyr_nfc_chip_name:file r_file_perms;
++
++# The sensors HAL enables the panel's palm sensor before arming the proximity
++# stream. /sys/class/sensors/palm_sensor carries the generic sysfs label; the
++# existing rule above is read-only, so the write was denied and palm rejection
++# never turned on.
++allow hal_sensors_default sysfs:file w_file_perms;
+diff --git a/sepolicy/vendor/wcnss_service_zephyr.te b/sepolicy/vendor/wcnss_service_zephyr.te
+new file mode 100644
+index 0000000..3fe9cb7
+--- /dev/null
++++ b/sepolicy/vendor/wcnss_service_zephyr.te
+@@ -0,0 +1,20 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++
++# cnss_diag writes and rotates firmware logs in /data/vendor/wlan_logs. The QCOM
++# wcnss policy already grants create_dir_perms/create_file_perms on
++# vendor_wifi_vendor_log_data_file in userdebug builds, but it does not grant
++# the read/write directory permissions needed once the directory exists. The
++# path label is supplied by file_contexts and applied by init.target.rc.
++allow vendor_wcnss_service vendor_wifi_vendor_log_data_file:dir rw_dir_perms;
++
++# cnss-daemon publishes a couple of WLAN properties at boot. The property
++# service itself is reached over property_socket, and the daemon was missing
++# the socket write, so every setprop failed before the property check:
++#
++#   avc: denied { write } for comm="cnss-daemon" name="property_service"
++#     scontext=u:r:vendor_wcnss_service:s0
++#     tcontext=u:object_r:property_socket:s0 tclass=sock_file
++allow vendor_wcnss_service property_socket:sock_file write;

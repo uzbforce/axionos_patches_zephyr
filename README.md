@@ -77,9 +77,10 @@ Output: `out/target/product/zephyr/axion-2.9-NOESIS-<YYYYMMDD>-UNOFFICIAL-VANILL
 (about 1.8 GB; `lineage_zephyr-ota.zip` is the same package under the internal
 name). For a GMS build use `axion zephyr userdebug gms` before `mka bacon`.
 
-The build that produced this patch set finished in 30:00 with `mka bacon -j64`
-and the resulting `boot.img` contains the stock `5.15.194-android13-8` kernel.
-It has **not** been boot-tested on hardware yet.
+The first build finished in 30:00 with `mka bacon -j64`; the 2026-11-26 rebuild
+with the 24.0 backport took 5:26. The resulting `boot.img` contains the stock
+`5.15.194-android13-8` kernel. The 2026-11-25 package booted on hardware; the
+2026-11-26 package has not been flashed yet.
 
 ## AxionOS device configuration
 
@@ -99,7 +100,7 @@ Set in `device/xiaomi/zephyr/lineage_zephyr.mk` (patch
 | `TARGET_SHIPS_AXION_KERNEL_MODULES` | `false` | same |
 | `TARGET_NEEDS_DOZE_FIX` | `false` | not needed |
 | `TARGET_INCLUDE_AXFX` | `false` | first bring-up build |
-| `TARGET_TAP_TO_WAKE` | `/proc/tp_gesture` | double-tap-to-wake via QTI power HAL extension |
+| `qtipower.mode_ext_lib` | `//device/xiaomi/zephyr:libperfmgr-ext-xiaomi` | the only hook `vendor/qcom/opensource/power` reads; drives DT2W |
 
 UDFPS is the AIDL fingerprint service
 (`android.hardware.biometrics.fingerprint-service.lineage`) plus
@@ -107,10 +108,60 @@ UDFPS is the AIDL fingerprint service
 press/release and the panel's local white 1000-nit HBM. AxionOS has no separate
 `libudfpshandler` module anymore, so that package was removed from `device.mk`.
 
+The service attaches the stock FOD engine from `libmifpext.so` in `openHal()`
+(`XiaomiFingerprint::getInstance()->setDevice()`). That engine is what arms the
+touch IC and watches `fod_press_status` while the display is off, so a
+screen-off touch starts the capture even before SystemUI has replayed the
+gesture. Without it the panel can light up while no scan is ever started.
+
+The same wrapper gates the vendor `extCmd`: a press waits up to 500 ms for the
+`disp_param` local-HBM node to become writable (the panel is still unblanking
+after a screen-off touch), and a release that arrives within 500 ms of that
+press is dropped instead of being forwarded. That early release is the touch
+controller's spurious finger-up while the panel wakes; the Goodix HAL aborts
+the scan with `GF_ERROR_TOO_FAST` when it sees it, which was the original 13 ms
+HBM flash. A real release, the authentication result, or the framework's 2.5 s
+AOD timer still ends the gesture.
+
+`frameworks/base` patch 0002 pairs with it: `UdfpsController` ignores the
+HAL's `FINGERPRINT_ACQUIRED_VENDOR` lifecycle events (they are not final image
+results), ignores a touch-up while the synthetic AOD gesture is active, raises
+the AOD finger-up fallback to 2.5 s, and `DozeSensors` takes the wakeup UDFPS
+sensor and fills the trigger coordinates from `config_udfps_sensor_props`.
+
 Note: AxionOS 2.9 does not ship a `libperfmgr` package. The flag currently only
 controls `persist.sys.ax_disable_pwrhal` (and the AxionParts switch behind it).
 If the device turns out to need the QTI perf HAL instead, set
 `TARGET_DISABLES_LIBPERF := true`.
+
+## LineageOS 24.0 device fixes backported
+
+`uzbforce/android_device_xiaomi_zephyr` also has a `lineage-24.0` branch whose
+top commits are device fixes that apply to the 23.2 tree unchanged.
+`patches/device/xiaomi/zephyr/0002-*` and
+`patches/vendor/xiaomi/zephyr/0001-*` are that backport, restricted to the parts
+that are not Android 17-only. The framework half of the screen-off UDFPS fix is
+`patches/frameworks/base/0002-*`.
+
+| Fix | Where | What was wrong |
+|---|---|---|
+| Window-level blurs | `configs/properties/vendor.prop` | `ro.surface_flinger.supports_background_blur` was missing, so `BlurUtils` reported `supportsBlursOnWindows=false` and Settings hid the blur switches. Blur still defaults to off. |
+| Recovery touchscreen | `recovery/root/system/etc/init/init.qcom.recovery.rc`, `device.mk` | Recovery never loaded `ft3683g_spi` and recovery does not mount `vendor_dlkm`, so it had no touch input. The three modules are now copied from `device/xiaomi/zephyr-kernel/vendor_dlkm` into the recovery ramdisk and insmod'ed after their dependencies. |
+| Double-tap to wake | `BoardConfig.mk`, `power/power-mode.cpp`, `configs/idc/fts_ts.idc`, `overlay/FrameworksResCommon` | `TARGET_POWERHAL_MODE_EXT` is not read by `vendor/qcom/opensource/power`; the extension is only linked through `soong_config_set(qtipower,mode_ext_lib,...)`. The panel is a Focaltech FT3683G, not a Synaptics TCM, so `TARGET_TAP_TO_WAKE` (`/proc/tp_gesture`) cannot work. The extension now arms touch mode 14 through `/dev/xiaomi-touch` and sends the `EV_SYN/SYN_CONFIG` event; the IDC keeps the device enabled in the inactive viewport. |
+| Screen-off UDFPS | `sensors/udfps`, `device.mk`, `overlay/FrameworksResCommon`, vendor `hals.conf`, `hardware/lineage/interfaces` patch 0001, `frameworks/base` patch 0002 | The vendor SSC AOD sensor is a special-trigger sensor, which `requestTriggerSensor()` rejects. A device sub-HAL (`sensors.xiaomi.zephyr.udfps`) exposes a normal one-shot wakeup sensor, arms touch FOD mode 10 and watches `fod_press_status`. It is listed in `hals.conf` so the multi-HAL loads it. The fingerprint wrapper attaches the vendor FOD engine, gates the early release that aborted the scan, and SystemUI ignores the vendor acquired lifecycle events; see the UDFPS note above. |
+| Denial cleanups | `sepolicy/vendor/*` | `wlan_logs` labelling (`cnss_diag` was denied every second; 335 of 608 denials), audio/USB/display/camera/perf battery and backlight reads, `mi_thermald` thermal inputs, fingerprint `sys_nice`, fingerprint property types, sensors UDFPS ioctls, camera/perf battery reads, battery-anti-aging kmsg and battery supply traversal, the TMS NFC `/dev/tms_nfc` and `/sys/nfc/chip_name` labels (the unlabelled node made `init`'s `wait` spin: 494 denials), `vendor_qti_init_shell` battery-node setattr (118), the camera perf-optimisation script's exec domain, and the display-feature daemon's binder calls. |
+| `system_dlkm` AVB | `rootdir/etc/fstab.qcom`, `fstab.emmc` | `system_dlkm` is chained from `vbmeta_system`, not the top-level `vbmeta`; the fstab now says `avb=vbmeta_system`. |
+| Early HAL start | `rootdir/etc/init/hw/init.target.rc` | `wait_for_keymaster` is not built and `keymaster-4-0` is not a service on this vendor (keymint is), so both lines only produced init errors. Replaced with `class_start early_hal`. |
+| Dalvik heap | `device.mk` | The tree inherited the 6 GB heap table on a 3.7 GiB device (256m growth limit, 32m max free). Uses the 4 GB table (192m/16m). |
+| Biometric dialog corners | `overlay/SystemUIResCommon/res/values/dimens.xml` | Match the panel's 54.86dp corner radius. |
+
+Deliberately **not** backported, because it is Android 17-only or already
+provided by AxionOS: `developer_gsi_keys.mk` /
+`BOARD_MOVE_GSI_AVB_KEYS_TO_VENDOR_BOOT`, `libion.vendor`, the
+`tracking_list.yaml` treble-labeling entry, removal of the
+`hardware/google/pixel/kernel_headers` namespace, the private AVB key paths,
+`FaceUnlock` (Axion ships `co.aospa.sense` already), and the `Android.bp`
+recovery `prebuilt_etc` (this tree already copies `recovery/root`).
 
 ## Patches that needed rebasing for AxionOS
 
@@ -171,9 +222,64 @@ kernel `sched_param` patch has been applied.
 The kernel source is not a `repo` project; `sync.sh` clones it to
 `kernel/xiaomi/zephyr` if it is missing.
 
+## Device audit (2026-11-26, post-flash)
+
+Audit of the flashed 2026-11-26 package after the recovery/DT2W/UDFPS/blur
+backport:
+
+- recovery and DT2W are confirmed working by the maintainer; screen-off UDFPS
+  unlocks, but its HBM was turning off 13 ms after it came on. See the UDFPS
+  note above; the fix is in this package.
+- no crashes: the crash buffer is empty, `/data/tombstones` is empty, and the
+  dropbox holds only `SYSTEM_BOOT` and `storage_trim`. `exit-info` shows only
+  ordinary lmkd reclaim of cached processes (acore, timeservice,
+  ondevicepersonalization).
+- 906 AVC denials in the boot's audit buffer. The big ones are the 494
+  `/dev/tms_nfc` `getattr` loop from `init`'s `wait`, 118 charger-node `setattr`
+  from `vendor_qti_init_shell`, and the battery/`chip_name` reads from
+  camera/perf/sensors. All are addressed here except the `system_suspend`
+  suspend-stats reads (that domain is not exported to vendor policy) and the
+  `rild` QcriNvOpt service registration / TEE block-device probes, which are
+  benign at boot.
+- NFC is absent on this SKU (`ro.boot.hardware.sku=p19a`); `nfc-service-tms`
+  only starts for `p19ae`/`p19ap`. That is a variant decision, not a bring-up
+  bug; labelling `/dev/tms_nfc` only stops the `wait` loop.
+- the runtime still reports `ro.build.type=user` / `ro.debuggable=0` while
+  `/system/build.prop` says `userdebug`. The boot image ramdisk is empty, so
+  those come from the vendor_boot ramdisk of an earlier `user` build. Flash
+  `boot.img`, `vendor_boot.img`, `init_boot.img` and `recovery.img` from the
+  same package to align them.
+
+## Device audit (2026-11-26, 2026-11-25 package)
+
+`adb shell` audit of the running package, before the backport:
+
+- thermal zones 32–35 °C, no throttling; CPU scaling 691 MHz – 2.9 GHz; no kernel
+  or `PowerManagerService` wakelocks held; battery 30–31 °C, health OK.
+- the crash buffer is empty; the `Process ... has died` lines in logcat are
+  ordinary lmkd reclaim of cached processes.
+- 608 AVC denials in 13 minutes: 335 from `vendor_wcnss_service` on
+  `/data/vendor/wlan_logs`, and most of the rest are the audio / USB / display /
+  camera battery and backlight reads. All are addressed by the sepolicy part of
+  the backport. `system_suspend` also has 19 read denials on the suspend-stats
+  files, but that domain is not exported to vendor policy, so those stay.
+- `ro.surface_flinger.supports_background_blur` was absent and `BlurUtils`
+  reported `supportsBlursOnWindows=false`, so Settings had no blur switch.
+- `fts_ts.idc` was not installed, `mDoubleTapWakeEnabled` was false even with
+  `double_tap_to_wake=1`, and neither `sensors.xiaomi.zephyr.udfps.so` nor its
+  `hals.conf` line existed.
+- the flashed images are inconsistent: `/system/build.prop` says
+  `ro.build.type=userdebug` but the runtime props report `ro.build.type=user`
+  and `ro.debuggable=0`. No `build.prop` on any partition sets those values, so
+  the boot/vendor_boot ramdisk `prop.default` comes from an earlier `user`
+  build. Flash `boot.img`, `vendor_boot.img`, `init_boot.img` and `recovery.img`
+  from the same package to make the runtime props match the system image.
+
 ## Notes
 
 - `apply.sh` leaves changes unstaged. Nothing in this repo requires a commit.
+- `recovery.img` is a separate partition on zephyr (not recovery-as-boot); the
+  touch fix is only active once that image is flashed.
 - The build is `userdebug`; `WITH_ADB_INSECURE` is set by the device tree for
   non-user builds so adb works before SystemUI is up.
 - Stock images are EROFS, the super partition uses virtual A/B v3, and AVB keys
