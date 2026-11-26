@@ -27,6 +27,7 @@ local_manifests/zephyr.xml   pinned device/vendor/platform projects
 patches/<project>/<n>-*.patch   applies in $ANDROID_BUILD_TOP/<project>
 sync.sh                      copy the manifest in and repo sync the projects
 apply.sh                     apply every patch; skip ones already in the tree
+build.sh                     build vanilla / gms / core / pico
 capture.sh                   capture a new change as a patch
 ```
 
@@ -67,15 +68,18 @@ device/xiaomi/zephyr/tools/gen-prebuilt-kernel.py \
     --out device/xiaomi/zephyr-kernel
 ANDROID_BUILD_TOP="$PWD" device/xiaomi/zephyr/tools/gen-kernel-headers.sh
 
-# 6. Build
-source build/envsetup.sh
-axion zephyr userdebug          # lunches lineage_zephyr-bp4a-userdebug
-mka bacon -j"$(nproc)"
+# 6. Build (vanilla, or pass gms / core / pico)
+./axionos_patches_zephyr/build.sh vanilla
 ```
 
 Output: `out/target/product/zephyr/axion-2.9-NOESIS-<YYYYMMDD>-UNOFFICIAL-VANILLA-zephyr.zip`
 (about 1.8 GB; `lineage_zephyr-ota.zip` is the same package under the internal
-name). For a GMS build use `axion zephyr userdebug gms` before `mka bacon`.
+name). `./build.sh gms` produces the `GMS` variant; see "Build variants".
+
+`build.sh` creates an empty `vendor/lineage-priv/keys` before sourcing
+`envsetup.sh`. Axion's `setup_keys()` runs before it exports `ANDROID_KEY_PATH`,
+so on a tree without keys it calls `gk` with an empty path and aborts; the empty
+directory keeps that a no-op and keeps the AOSP test keys these packages use.
 
 The first build finished in 30:00 with `mka bacon -j64`; the 2026-11-26 rebuild
 with the 24.0 backport took 5:26. The resulting `boot.img` contains the stock
@@ -96,8 +100,8 @@ Set in `device/xiaomi/zephyr/lineage_zephyr.mk` (patch
 | `HBM_SUPPORTED` | `true` | panel exposes `hbm_mode`; FOD uses local HBM |
 | `HBM_NODE` | `/sys/class/backlight/panel0-backlight/hbm_mode` | |
 | `TARGET_DISABLES_LIBPERF` | `false` | libperfmgr path enabled ("true" = disabled) |
-| `TARGET_SUPPORTS_KERNEL_MANAGER` | `false` | prebuilt kernel has no Axion kmods |
-| `TARGET_SHIPS_AXION_KERNEL_MODULES` | `false` | same |
+| `TARGET_SUPPORTS_KERNEL_MANAGER` | `true` | sysfs-only, works on the stock kernel |
+| `TARGET_SHIPS_AXION_KERNEL_MODULES` | `false` | prebuilt kernel has no Axion kmods |
 | `TARGET_NEEDS_DOZE_FIX` | `false` | not needed |
 | `TARGET_INCLUDE_AXFX` | `false` | first bring-up build |
 | `qtipower.mode_ext_lib` | `//device/xiaomi/zephyr:libperfmgr-ext-xiaomi` | the only hook `vendor/qcom/opensource/power` reads; drives DT2W |
@@ -133,6 +137,69 @@ Note: AxionOS 2.9 does not ship a `libperfmgr` package. The flag currently only
 controls `persist.sys.ax_disable_pwrhal` (and the AxionParts switch behind it).
 If the device turns out to need the QTI perf HAL instead, set
 `TARGET_DISABLES_LIBPERF := true`.
+
+## Performance audit and Kernel Manager
+
+Audited against the booted device on 2026-11-26. Already active:
+
+- RAM Plus: zram0 with a 2 GB swap area, `persist.sys.ax_mem.swappiness=100`,
+  `persist.sys.ax_rp_supp=true`.
+- QTI perf HAL (`perf-hal-2-3`) with the stock `powerhint.xml` and
+  `perfconfigstore.xml` blobs.
+- Dexpreopt: `SystemUI`, `Launcher3QuickStep`, `Settings`, `AxionParts`,
+  `GameSpace`, `EdgeLauncher` and `AxThemePicker` use the speed filter
+  (`vendor/lineage/config/common.mk` + `device/axion/common/config/dexpreopt.mk`).
+- 4 GB dalvik heap table, EROFS/lz4 images, F2FS `/data` with `gc_merge`,
+  120 Hz peak refresh, DT2W and local HBM.
+- The Axion kernel modules (BORE/latency scheduler, ax_boost, dragonite) cannot
+  load into the stock 5.15 prebuilt: it has none of their trace hooks. BORE and
+  the latency scheduler are core-scheduler changes, not loadable modules, so
+  `TARGET_SHIPS_AXION_KERNEL_MODULES` stays `false`.
+
+Added by this package:
+
+- `ax_kernel_manager.xml`: both CPU clusters (policy0 300 MHz-1.9 GHz, policy4
+  300 MHz-2.9 GHz, the eight available governors) and the Adreno 610 devfreq
+  limits. `TARGET_SUPPORTS_KERNEL_MANAGER := true` installs it as
+  `/system_ext/etc/ax_kernel_manager.xml`.
+- `ax_init_bengal.rc`: hands the root-owned `scaling_governor` and kgsl
+  `devfreq/{min,max}_freq` nodes to `system:system` at boot. Before this the
+  Kernel Manager could read the controls but every governor/GPU write returned
+  EACCES; `scaling_governor` was `0644 root:root` on the booted device.
+- `sepolicy/vendor/init_kernel_manager.te`: the setattr init needs to chown
+  those nodes.
+
+Deliberately left off, because each changes behaviour and needs a hardware
+check:
+
+- `TARGET_ENABLES_IMS_OVERRIDES` forces VoLTE/VoWiFi/VoNR carrier config on.
+- `BYPASS_CHARGE_SUPPORTED` exposes the GameSpace bypass-charge toggle (the
+  Lineage Health switch is already pinned to
+  `/sys/class/qcom-battery/input_suspend`).
+- `debug.hwui.renderer=skiavk`; the device currently runs SkiaGL.
+- AxionFX (`TARGET_INCLUDE_AXFX`).
+
+## Build variants
+
+```bash
+./build.sh vanilla      # no Google apps (default)
+./build.sh gms          # FullPkgs, SetupWizard, Play Store
+./build.sh core         # CorePkgs
+./build.sh pico         # PicoPkgs
+./build.sh gms bootimage
+```
+
+The variant has to be in the environment before `lunch`: Axion derives
+`AXION_BUILD_VARIANT` (and the zip name) from `WITH_GMS` /
+`TARGET_GAPPS_VARIANT` while the product is being configured. `gms` is the
+full set; `core` and `pico` are the lighter Google packages, useful on a 4 GB
+SKU.
+
+Both variants share `out/`, and the OTA zip is a hardlink to
+`lineage_zephyr-ota.zip`: building the second variant overwrites the first
+package even though the file name differs. Copy each zip out of
+`out/target/product/zephyr/` before starting the next variant. The 2026-11-26
+audit rebuilds took 5:19 (vanilla) and 10:01 (GMS) incrementally.
 
 ## LineageOS 24.0 device fixes backported
 

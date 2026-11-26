@@ -1,0 +1,181 @@
+diff --git a/lineage_zephyr.mk b/lineage_zephyr.mk
+--- a/lineage_zephyr.mk
++++ b/lineage_zephyr.mk
+@@ -31,6 +31,17 @@
+ # These are read while the common config below is inherited (flags.mk,
+ # board/common.mk and version.mk), so they have to be set first.
+ # ---------------------------------------------------------------------------
++# board/common.mk looks for ax_kernel_manager.xml under $(DEVICE_PATH).
++# BoardConfig.mk sets the same value for the board pass; the product pass is a
++# separate make run, so it needs its own copy or the lookup expands to
++# /ax_kernel_manager.xml and the file is never installed.
++DEVICE_PATH := device/xiaomi/zephyr
++
++# The platform init rc is installed explicitly from device.mk: Axion's own
++# lookup keys its destination on AXION_SOC, which soc_map.mk derives from
++# TARGET_BOARD_PLATFORM - empty in the product pass - so it would land as
++# /vendor/etc/init/ax_init_.rc.
++
+ AXION_MAINTAINER := uzbforce
+ AXION_PROCESSOR  := Snapdragon_6s_Gen2
+ 
+@@ -48,10 +59,14 @@
+ # doze pulse helpers.
+ TARGET_NEEDS_DOZE_FIX := false
+ 
+-# The kernel is the stock prebuilt: no in-tree Axion kernel modules can be
+-# loaded into it, and there is no ax_kernel_manager.xml for this device.
++# The kernel is the stock prebuilt, so no in-tree Axion kernel modules can be
++# loaded into it (no BORE/latency scheduler, no ax_boost). The Kernel Manager
++# does work: it only reads and writes the cpufreq and kgsl devfreq sysfs nodes,
++# which the stock kernel exposes. ax_kernel_manager.xml describes both CPU
++# clusters and the Adreno 610, and ax_init_bengal.rc hands the root-owned
++# governor/devfreq nodes to system_server at boot.
+ TARGET_SHIPS_AXION_KERNEL_MODULES := false
+-TARGET_SUPPORTS_KERNEL_MANAGER    := false
++TARGET_SUPPORTS_KERNEL_MANAGER    := true
+ 
+ # Keep libperfmgr enabled; set TARGET_DISABLES_LIBPERF := true to fall back.
+ TARGET_DISABLES_LIBPERF := false
+diff --git a/device.mk b/device.mk
+--- a/device.mk
++++ b/device.mk
+@@ -126,6 +126,14 @@
+ 
+ # Rootdir init scripts (stock vendor/etc/init/hw, needed because the vendor
+ # blob list deliberately excludes them)
++#
++# ax_init_bengal.rc is the Kernel Manager hand-off: it chowns the root-owned
++# cpufreq governor and kgsl devfreq limit nodes to system:system. Axion's
++# ax_init_<soc>.rc lookup cannot name it correctly in the product pass (see
++# lineage_zephyr.mk), so install it here.
++PRODUCT_COPY_FILES += \
++    device/xiaomi/zephyr/ax_init_bengal.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/ax_init_bengal.rc
++
+ PRODUCT_PACKAGES += \
+     init.qcom.factory.rc \
+     init.qcom.rc \
+diff --git a/ax_kernel_manager.xml b/ax_kernel_manager.xml
+new file mode 100644
+--- /dev/null
++++ b/ax_kernel_manager.xml
+@@ -0,0 +1,52 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    Kernel Manager config - zephyr (SM6225-AF, bengal)
++
++    Values read from the booted device:
++
++      policy0 (cpu0-3, 4x Cortex-A53)
++        300 MHz - 1900.8 MHz
++      policy4 (cpu4-7, 4x Cortex-A73)
++        300 MHz - 2918.4 MHz
++      GPU
++        Adreno 610, kgsl devfreq
++-->
++
++<kernel-manager>
++    <cpu
++        id="little"
++        group="Little Cores"
++        minId="axion_min_freq"
++        maxId="axion_max_freq"
++        governorId="little_cpu_governor"
++        minNode="/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq"
++        maxNode="/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq"
++        availablePath="/sys/devices/system/cpu/cpufreq/policy0/scaling_available_frequencies"
++        governorNode="/sys/devices/system/cpu/cpufreq/policy0/scaling_governor"
++        governorAvailablePath="/sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors"
++        cpuIds="0-3" />
++
++    <cpu
++        id="big"
++        group="Big Cores"
++        minId="axion_min_freq_big"
++        maxId="axion_max_freq_big"
++        governorId="big_cpu_governor"
++        minNode="/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq"
++        maxNode="/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq"
++        availablePath="/sys/devices/system/cpu/cpufreq/policy4/scaling_available_frequencies"
++        governorNode="/sys/devices/system/cpu/cpufreq/policy4/scaling_governor"
++        governorAvailablePath="/sys/devices/system/cpu/cpufreq/policy4/scaling_available_governors"
++        cpuIds="4-7" />
++
++    <gpu
++        id="gpu"
++        group="GPU"
++        minId="axion_gpu_min_freq"
++        maxId="axion_gpu_max_freq"
++        node="/sys/class/kgsl/kgsl-3d0/devfreq"
++        currentNode="/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq"
++        availablePath="/sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies"
++        usageNode="/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage"
++        frequencyMultiplier="1" />
++</kernel-manager>
+diff --git a/ax_init_bengal.rc b/ax_init_bengal.rc
+new file mode 100644
+--- /dev/null
++++ b/ax_init_bengal.rc
+@@ -0,0 +1,35 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++# AxionParts' Kernel Manager writes these nodes as system_server. scaling_min/
++# max_freq already ship system-writable, but the governor nodes and the kgsl
++# devfreq limits are root-only, so the picker would fail with EACCES. Axion's
++# own devices do the same hand-off in their ax_init_<soc>.rc; zephyr had no
++# such file, which is why the CPU governor control could not be applied.
++#
++# Installed as /vendor/etc/init/ax_init_bengal.rc by device/axion/common.
++
++on post-fs-data
++
++    # CPU Little cluster (policy0)
++    chown system system /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
++    chown system system /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq
++    chown system system /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq
++    chmod 0660 /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
++    chmod 0660 /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq
++    chmod 0660 /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq
++
++    # CPU Big cluster (policy4)
++    chown system system /sys/devices/system/cpu/cpufreq/policy4/scaling_governor
++    chown system system /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
++    chown system system /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq
++    chmod 0660 /sys/devices/system/cpu/cpufreq/policy4/scaling_governor
++    chmod 0660 /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
++    chmod 0660 /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq
++
++    # Adreno 610 (kgsl devfreq)
++    chown system system /sys/class/kgsl/kgsl-3d0/devfreq/min_freq
++    chown system system /sys/class/kgsl/kgsl-3d0/devfreq/max_freq
++    chmod 0660 /sys/class/kgsl/kgsl-3d0/devfreq/min_freq
++    chmod 0660 /sys/class/kgsl/kgsl-3d0/devfreq/max_freq
+diff --git a/sepolicy/vendor/init_kernel_manager.te b/sepolicy/vendor/init_kernel_manager.te
+new file mode 100644
+--- /dev/null
++++ b/sepolicy/vendor/init_kernel_manager.te
+@@ -0,0 +1,22 @@
++#
++# SPDX-FileCopyrightText: The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++#
++# ax_init_zephyr.rc chowns the kgsl devfreq limit nodes to system:system so
++# AxionParts' Kernel Manager can write them. init runs as root, but SELinux
++# still gates path traversal and the ownership change; the stock bengal policy
++# grants neither. system_server's side of the same nodes is already allowed by
++# device/axion/common/sepolicy/vendor/qcom/ax_kernel_manager.te.
++#
++# In this policy the kgsl devfreq directory and its attributes carry
++# vendor_sysfs_kgsl (verified from the booted device's AVC denials);
++# vendor_sysfs_devfreq is used by the other devfreq devices and is covered in
++# case a kernel revision relabels the kgsl nodes.
++
++allow init vendor_sysfs_kgsl:dir r_dir_perms;
++allow init vendor_sysfs_kgsl:lnk_file read;
++allow init vendor_sysfs_kgsl:file { getattr setattr };
++
++allow init vendor_sysfs_devfreq:dir r_dir_perms;
++allow init vendor_sysfs_devfreq:lnk_file read;
++allow init vendor_sysfs_devfreq:file { getattr setattr };
