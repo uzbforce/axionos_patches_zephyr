@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Redmi Note 17 4G (zephyr / p19a, SM6225-AF bengal) for AxionOS 2.9 (bp4a,
+    Android 16.2 / lineage-23.2 base).
+
+    The platform set is the one the LineageOS 23.2 device tree pins in
+    device/xiaomi/zephyr/local_manifests/zephyr.xml: AxionOS' own
+    hardware/qcom-caf/common predates TARGET_BOARD_SUFFIX := _515 and does not
+    create the sm6225 pickup files, so it is replaced by the rn124g mirror.
+-->
+<manifest>
+    <!-- Replace Axion's common qcom tree with the SM6225-aware fork. -->
+    <remove-project name="android_hardware_qcom-caf_common" />
+
+    <project path="hardware/qcom-caf/common"
+             name="uzbforce/android_hardware_qcom-caf_common"
+             revision="13ccfb8d9c32edd33be58467d4490f6236c768e3"
+             remote="github">
+        <linkfile src="os_pickup_aosp.mk" dest="hardware/qcom/Android.mk" />
+        <linkfile src="os_pickup_sepolicy_vndr.mk" dest="device/qcom/sepolicy_vndr/SEPolicy.mk" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm6225/Android.bp" />
+        <linkfile src="os_pickup.mk" dest="hardware/qcom-caf/sm6225/Android.mk" />
+        <linkfile src="os_pickup_audio-ar.mk" dest="hardware/qcom-caf/sm6225/audio/Android.mk" />
+
+        <!-- Keep the soong_namespace stubs the replaced Axion entry provided. -->
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/msm8953/Android.bp" />
+        <linkfile src="os_pickup.bp" dest="hardware/qcom-caf/msm8998/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sdm660/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sdm845/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8150/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8250/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8350/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8450/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8450-6.6/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8550/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8650/Android.bp" />
+        <linkfile src="os_pickup_qssi.bp" dest="hardware/qcom-caf/sm8750/Android.bp" />
+    </project>
+
+    <!-- No sm6225/display: the SDE/DPU HAL needs techpack display headers the
+         stock prebuilt kernel tree does not ship. Graphics stays on blobs. -->
+    <project path="hardware/qcom-caf/sm6225/media"
+             name="uzbforce/android_hardware_qcom-caf_sm6225_media"
+             revision="03414335fa7fa9783a51a9e6ac38f6cbd9029205" remote="github" />
+    <project path="hardware/qcom-caf/sm6225/audio/agm"
+             name="uzbforce/android_hardware_qcom-caf_sm6225_audio_agm"
+             revision="0e2e45e0891bd8f0059e9c6af02868e66da26e4d" remote="github" />
+    <project path="hardware/qcom-caf/sm6225/audio/pal"
+             name="uzbforce/android_hardware_qcom-caf_sm6225_audio_pal"
+             revision="1ea13648bac9fc36318b606f4a0fac9826523a1c" remote="github" />
+    <project path="hardware/qcom-caf/sm6225/audio/primary-hal"
+             name="uzbforce/android_hardware_qcom-caf_sm6225_audio_primary-hal"
+             revision="6f77f956487bddc892b0a054fe00de05638f724d" remote="github" />
+    <project path="hardware/qcom-caf/sm6225/data-ipa-cfg-mgr"
+             name="uzbforce/android_hardware_qcom-caf_sm6225_data-ipa-cfg-mgr"
+             revision="9252e280accd6a2799fa7e01969abd11104fe8c8" remote="github" />
+    <project path="hardware/qcom-caf/sm6225/dataipa"
+             name="uzbforce/android_hardware_qcom-caf_sm6225_dataipa"
+             revision="e685fc9276f294e87c5d2548241ff73b5ac8286c" remote="github" />
+
+    <!-- Nested inside Axion's device/qcom/sepolicy_vndr directory. -->
+    <project path="device/qcom/sepolicy_vndr/sm6225"
+             name="uzbforce/android_device_qcom_sepolicy_vndr_sm6225"
+             revision="5429896afe3169e55f7c5a33e5a15447f5f6ee44" remote="github" />
+
+    <project path="device/xiaomi/zephyr"
+             name="uzbforce/android_device_xiaomi_zephyr"
+             revision="aa4204a802f4e4678be0cefb0b20d206c234e386" remote="github" />
+    <project path="vendor/xiaomi/zephyr"
+             name="uzbforce/android_vendor_xiaomi_zephyr"
+             revision="34c36af0db2c4b08f6527da9f5757a008b1688a0" remote="github" />
+</manifest>

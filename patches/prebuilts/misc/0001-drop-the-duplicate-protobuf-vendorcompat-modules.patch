@@ -1,0 +1,104 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [prebuilts/misc] drop the duplicate protobuf vendorcompat modules
+
+diff --git a/protobuf_vendorcompat/Android.bp b/protobuf_vendorcompat/Android.bp
+index f72230f9..916c8793 100644
+--- a/protobuf_vendorcompat/Android.bp
++++ b/protobuf_vendorcompat/Android.bp
+@@ -10,91 +10,8 @@ license {
+ }
+ 
+ // Workaround for neural networks HAL on barbet
+-cc_prebuilt_library_shared {
+-    name: "libprotobuf-cpp-full-3.9.1-vendorcompat",
+-    stem: "libprotobuf-cpp-full-3.9.1",
+-    ignore_max_page_size: true,
+-    vendor: true,
+-    target: {
+-        android_arm64: {
+-            srcs: ["arm64/libprotobuf-cpp-full-3.9.1.so"],
+-        },
+-        android_arm: {
+-            srcs: ["arm/libprotobuf-cpp-full-3.9.1.so"],
+-        },
+-    },
+-
+-    shared_libs: [
+-        "libc++",
+-        "libc",
+-        "libdl",
+-        "liblog",
+-        "libm",
+-        "libz",
+-    ],
+-}
+-
+-// Workaround for Qualcomm prebuilts used by partners.
+-cc_prebuilt_library_shared {
+-    name: "libprotobuf-cpp-lite-3.9.1-vendorcompat",
+-    stem: "libprotobuf-cpp-lite-3.9.1",
+-    ignore_max_page_size: true,
+-    vendor: true,
+-    target: {
+-        android_arm64: {
+-            srcs: ["arm64/libprotobuf-cpp-lite-3.9.1.so"],
+-        },
+-        android_arm: {
+-            srcs: ["arm/libprotobuf-cpp-lite-3.9.1.so"],
+-        },
+-    },
+-
+-    shared_libs: [
+-        "libc++",
+-        "libc",
+-        "libdl",
+-        "liblog",
+-        "libm",
+-        "libz",
+-    ],
+-}
+-
+-cc_prebuilt_library_shared {
+-    name: "libprotobuf-cpp-full-21.12-vendorcompat",
+-    stem: "libprotobuf-cpp-full-21.12",
+-    vendor: true,
+-    target: {
+-        android_arm: {
+-            srcs: ["arm/libprotobuf-cpp-full-21.12.so"],
+-        },
+-    },
+-
+-    shared_libs: [
+-        "libc++",
+-        "libc",
+-        "libdl",
+-        "liblog",
+-        "libm",
+-        "libz",
+-    ],
+-}
+-
+-cc_prebuilt_library_shared {
+-    name: "libprotobuf-cpp-lite-21.12-vendorcompat",
+-    stem: "libprotobuf-cpp-lite-21.12",
+-    vendor: true,
+-    target: {
+-        android_arm: {
+-            srcs: ["arm/libprotobuf-cpp-lite-21.12.so"],
+-        },
+-    },
+-
+-    shared_libs: [
+-        "libc++",
+-        "libc",
+-        "libdl",
+-        "liblog",
+-        "libm",
+-        "libz",
+-    ],
+-}
++// The libprotobuf-cpp-*-vendorcompat modules that used to live here are
++// defined by hardware/lineage/compat, which builds them with both the 32-bit
++// and 64-bit targets (and the 16 KB arm64 21.12 variant this device needs).
++// Defining them in both places makes soong abort with
++// "module prebuilt_libprotobuf-... already defined".

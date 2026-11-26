@@ -1,0 +1,109 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [device/xiaomi/zephyr] add the AxionOS product configuration
+
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 7e8a3dc..42331fb 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -32,6 +32,11 @@ ALLOW_MISSING_DEPENDENCIES                   := true
+ # device is never complete on the first boot.
+ SELINUX_IGNORE_NEVERALLOWS                   := true
+ 
++# AxionOS: build no in-tree Axion kernel modules. They are compiled against
++# TARGET_KERNEL_SOURCE and expect their trace hooks in the running Image; the
++# stock prebuilt kernel has none of them, so the modules would be useless.
++TARGET_SHIPS_AXION_KERNEL_MODULES := false
++
+ # ---------------------------------------------------------------------------
+ # Architecture
+ # ---------------------------------------------------------------------------
+diff --git a/device.mk b/device.mk
+index e826802..5391975 100644
+--- a/device.mk
++++ b/device.mk
+@@ -73,8 +73,8 @@ PRODUCT_SOONG_NAMESPACES += \
+ # This tree carries its own (empty) soong_namespace in Android.bp, so every
+ # module defined under it is invisible to the root namespace until the
+ # directory is imported. Without this line PRODUCT_PACKAGES entries naming
+-# device-tree modules -- the RROs, libudfpshandler
+-# -- are silently skipped rather than failing the build, which is why the
++# device-tree modules -- the RROs -- are silently skipped rather than failing
++# the build, which is why the
+ # fence shim never reached /vendor/lib64 even though the C2 component store
+ # blob requires it.
+ PRODUCT_SOONG_NAMESPACES += device/xiaomi/zephyr
+@@ -304,10 +304,14 @@ PRODUCT_PACKAGES += \
+ # module of the same name. Building it also keeps it in step with libdrm.
+ 
+ # ---------------------------------------------------------------------------
+-# Fingerprint — Goodix FOD, HAL is a vendor prebuilt
++# Fingerprint — Goodix FOD
++#
++# AxionOS' hardware/lineage/interfaces fork carries the AIDL fingerprint
++# service and its UDFPS press/release handling directly; the separate
++# libudfpshandler module Lineage 23.2 used here no longer exists in that tree,
++# and SystemUI gets the sensor geometry from config_udfps_sensor_props
++# (overlay/FrameworksResCommon).
+ # ---------------------------------------------------------------------------
+-PRODUCT_PACKAGES += \
+-    libudfpshandler
+ 
+ # ---------------------------------------------------------------------------
+ # Gatekeeper / keymaster / keymint
+diff --git a/lineage_zephyr.mk b/lineage_zephyr.mk
+index 9d07081..a1c2b9b 100644
+--- a/lineage_zephyr.mk
++++ b/lineage_zephyr.mk
+@@ -25,17 +25,46 @@ ifneq ($(TARGET_BUILD_VARIANT),user)
+ WITH_ADB_INSECURE := true
+ endif
+ 
+-# Inherit from LineageOS common configuration
++# ---------------------------------------------------------------------------
++# AxionOS device configuration
++#
++# These are read while the common config below is inherited (flags.mk,
++# board/common.mk and version.mk), so they have to be set first.
++# ---------------------------------------------------------------------------
++AXION_MAINTAINER := uzbforce
++AXION_PROCESSOR  := Snapdragon_6s_Gen2
++
++AXION_CAMERA_REAR_INFO  := 50
++AXION_CAMERA_FRONT_INFO := 16
++
++# The panel has the local-HBM switch the FOD blob drives; the Goodix HAL arms
++# it through the Xiaomi display-feature daemon (see the FOD patch in
++# axionos_patches_zephyr). Expose the same switch to AxionParts.
++HBM_SUPPORTED := true
++HBM_NODE      := /sys/class/backlight/panel0-backlight/hbm_mode
++
++# Double-tap-to-wake is implemented by the QTI power HAL extension
++# (power/power-mode.cpp, TARGET_TAP_TO_WAKE below); it does not use Axion's
++# doze pulse helpers.
++TARGET_NEEDS_DOZE_FIX := false
++
++# The kernel is the stock prebuilt: no in-tree Axion kernel modules can be
++# loaded into it, and there is no ax_kernel_manager.xml for this device.
++TARGET_SHIPS_AXION_KERNEL_MODULES := false
++TARGET_SUPPORTS_KERNEL_MANAGER    := false
++
++# Keep libperfmgr enabled; set TARGET_DISABLES_LIBPERF := true to fall back.
++TARGET_DISABLES_LIBPERF := false
++
++# No AxionFX on the first bring-up build.
++TARGET_INCLUDE_AXFX := false
++
++# Inherit from LineageOS common configuration (AxionOS' base)
+ $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
+ 
+ # Inherit the hardware configuration for the actual device
+ $(call inherit-product, device/xiaomi/zephyr/device.mk)
+ 
+-# Google apps. MindTheGapps is the package the LineageOS wiki points Android 16
+-# users at; vendor/gapps is the same project's inline-build tree, so the OTA
+-# ships GMS/Play Store/SetupWizard instead of asking for a separate sideload.
+-$(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)
+-
+ # Signing keys, when present
+ -include vendor/lineage-priv/keys/keys.mk
+ 

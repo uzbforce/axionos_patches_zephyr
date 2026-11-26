@@ -1,0 +1,18 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [hardware/qcom-caf/common] let the generic platform namespace see qti_kernel_headers
+
+diff --git a/os_pickup.bp b/os_pickup.bp
+index 9515b25..52bd92b 100644
+--- a/os_pickup.bp
++++ b/os_pickup.bp
+@@ -1,2 +1,10 @@
+ soong_namespace {
++    imports: [
++        // Same reason as os_pickup_qssi.bp: the platform media/display trees
++        // put qti_kernel_headers on their header_libs, and it is defined in
++        // this namespace. Without the import soong reports
++        // "module libc2dcolorconvert ... depends on undefined module
++        // qti_kernel_headers" for the msm8998 media tree.
++        "hardware/google/pixel/kernel_headers",
++    ],
+ }

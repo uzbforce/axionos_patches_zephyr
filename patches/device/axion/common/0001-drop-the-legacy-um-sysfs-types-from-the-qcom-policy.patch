@@ -1,0 +1,50 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [device/axion/common] drop the legacy-UM sysfs types from the QCOM policy
+
+diff --git a/sepolicy/vendor/qcom/ax_diagnostics.te b/sepolicy/vendor/qcom/ax_diagnostics.te
+index cf56655..3b0bfc8 100644
+--- a/sepolicy/vendor/qcom/ax_diagnostics.te
++++ b/sepolicy/vendor/qcom/ax_diagnostics.te
+@@ -10,12 +10,8 @@ allow ax_diagnostics vendor_sysfs_kgsl:file r_file_perms;
+ allow ax_diagnostics vendor_sysfs_kgsl:lnk_file read;
+ allow ax_diagnostics vendor_sysfs_kgsl_gpuclk:file r_file_perms;
+ 
+-allow ax_diagnostics sysfs_battery_supply:dir r_dir_perms;
+-allow ax_diagnostics sysfs_battery_supply:file r_file_perms;
+-allow ax_diagnostics sysfs_devfreq:dir r_dir_perms;
+-allow ax_diagnostics sysfs_devfreq:file r_file_perms;
+-allow ax_diagnostics sysfs_graphics:dir r_dir_perms;
+-allow ax_diagnostics sysfs_graphics:file r_file_perms;
+-allow ax_diagnostics sysfs_kgsl:dir r_dir_perms;
+-allow ax_diagnostics sysfs_kgsl:file r_file_perms;
+-allow ax_diagnostics sysfs_kgsl:lnk_file read;
++# The system-wide sysfs_battery_supply / sysfs_devfreq / sysfs_graphics /
++# sysfs_kgsl types only exist in the legacy-UM policy. zephyr uses the sm6225
++# QSSI policy, which labels the same nodes vendor_sysfs_* (covered above).
++# Keeping the legacy rules here makes checkpolicy abort with "unknown type
++# sysfs_battery_supply".
+diff --git a/sepolicy/vendor/qcom/ax_kernel_manager.te b/sepolicy/vendor/qcom/ax_kernel_manager.te
+index 22bfd42..7769db1 100644
+--- a/sepolicy/vendor/qcom/ax_kernel_manager.te
++++ b/sepolicy/vendor/qcom/ax_kernel_manager.te
+@@ -2,9 +2,9 @@ allow system_server vendor_sysfs_kgsl:dir { getattr search open read };
+ allow system_server vendor_sysfs_kgsl:file rw_file_perms;
+ allow system_server vendor_sysfs_kgsl:lnk_file rw_file_perms;
+ 
+-allow system_server sysfs_kgsl:dir { getattr search open read };
+-allow system_server sysfs_kgsl:file rw_file_perms;
+-allow system_server sysfs_kgsl:lnk_file rw_file_perms;
++# The system-wide sysfs_kgsl / sysfs_devfreq types only exist in the
++# legacy-UM policy. zephyr uses the sm6225 QSSI policy, where the same nodes
++# are vendor_sysfs_kgsl / vendor_sysfs_devfreq (covered above).
+ 
+ allow system_server vendor_sysfs_kgsl_gpuclk:file rw_file_perms;
+ allow system_server vendor_sysfs_kgsl_gpuclk:lnk_file rw_file_perms;
+@@ -17,7 +17,3 @@ allow system_server vendor_sysfs_kgsl_max_gpuclk:lnk_file rw_file_perms;
+ allow system_server vendor_sysfs_devfreq:dir { getattr search open read };
+ allow system_server vendor_sysfs_devfreq:file rw_file_perms;
+ allow system_server vendor_sysfs_devfreq:lnk_file rw_file_perms;
+-
+-allow system_server sysfs_devfreq:dir { getattr search open read };
+-allow system_server sysfs_devfreq:file rw_file_perms;
+-allow system_server sysfs_devfreq:lnk_file rw_file_perms;

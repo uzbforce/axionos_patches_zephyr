@@ -1,0 +1,26 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [kernel/xiaomi/zephyr] keep struct sched_param out of the exported uapi headers
+
+diff --git a/include/uapi/linux/sched/types.h b/include/uapi/linux/sched/types.h
+index f2c4589d4..ca68ab253 100644
+--- a/include/uapi/linux/sched/types.h
++++ b/include/uapi/linux/sched/types.h
+@@ -4,9 +4,18 @@
+ 
+ #include <linux/types.h>
+ 
++/*
++ * struct sched_param is not part of the userspace ABI any more: bionic (and
++ * glibc) define it in <sched.h> themselves, and a userspace module that ends
++ * up with both definitions fails to compile with "redefinition of
++ * 'sched_param'". Keeping the definition inside __KERNEL__ leaves the kernel
++ * compile untouched while headers_install drops it from the exported headers.
++ */
++#ifdef __KERNEL__
+ struct sched_param {
+ 	int sched_priority;
+ };
++#endif
+ 
+ #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
+ #define SCHED_ATTR_SIZE_VER1	56	/* add: util_{min,max} */
