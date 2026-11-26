@@ -1,20 +1,8 @@
 diff --git a/BoardConfig.mk b/BoardConfig.mk
-index 7e8a3dc..3a15db2 100644
+index 42331fb..3a15db2 100644
 --- a/BoardConfig.mk
 +++ b/BoardConfig.mk
-@@ -32,6 +32,11 @@ ALLOW_MISSING_DEPENDENCIES                   := true
- # device is never complete on the first boot.
- SELINUX_IGNORE_NEVERALLOWS                   := true
- 
-+# AxionOS: build no in-tree Axion kernel modules. They are compiled against
-+# TARGET_KERNEL_SOURCE and expect their trace hooks in the running Image; the
-+# stock prebuilt kernel has none of them, so the modules would be useless.
-+TARGET_SHIPS_AXION_KERNEL_MODULES := false
-+
- # ---------------------------------------------------------------------------
- # Architecture
- # ---------------------------------------------------------------------------
-@@ -534,10 +539,13 @@ AUDIO_FEATURE_ENABLED_HW_ACCELERATED_EFFECTS   := true
+@@ -539,10 +539,13 @@ AUDIO_FEATURE_ENABLED_HW_ACCELERATED_EFFECTS   := true
  AUDIO_FEATURE_ENABLED_EXTENDED_COMPRESS_FORMAT := true
  
  # Double-tap-to-wake is implemented in the power HAL extension (power/power-mode.cpp).
@@ -74,7 +62,7 @@ index 52d6ede..a2288da 100644
  debug.sf.enable_hwc_vds=0
  debug.sf.latch_unsignaled=1
 diff --git a/device.mk b/device.mk
-index e826802..186e335 100644
+index 5391975..186e335 100644
 --- a/device.mk
 +++ b/device.mk
 @@ -18,8 +18,11 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/generic_ramdisk.mk)
@@ -91,36 +79,7 @@ index e826802..186e335 100644
  
  # Proprietary vendor repo (generated from proprietary-files.txt)
  $(call inherit-product, vendor/xiaomi/zephyr/zephyr-vendor.mk)
-@@ -73,8 +76,8 @@ PRODUCT_SOONG_NAMESPACES += \
- # This tree carries its own (empty) soong_namespace in Android.bp, so every
- # module defined under it is invisible to the root namespace until the
- # directory is imported. Without this line PRODUCT_PACKAGES entries naming
--# device-tree modules -- the RROs, libudfpshandler
--# -- are silently skipped rather than failing the build, which is why the
-+# device-tree modules -- the RROs -- are silently skipped rather than failing
-+# the build, which is why the
- # fence shim never reached /vendor/lib64 even though the C2 component store
- # blob requires it.
- PRODUCT_SOONG_NAMESPACES += device/xiaomi/zephyr
-@@ -304,10 +307,14 @@ PRODUCT_PACKAGES += \
- # module of the same name. Building it also keeps it in step with libdrm.
- 
- # ---------------------------------------------------------------------------
--# Fingerprint — Goodix FOD, HAL is a vendor prebuilt
-+# Fingerprint — Goodix FOD
-+#
-+# AxionOS' hardware/lineage/interfaces fork carries the AIDL fingerprint
-+# service and its UDFPS press/release handling directly; the separate
-+# libudfpshandler module Lineage 23.2 used here no longer exists in that tree,
-+# and SystemUI gets the sensor geometry from config_udfps_sensor_props
-+# (overlay/FrameworksResCommon).
- # ---------------------------------------------------------------------------
--PRODUCT_PACKAGES += \
--    libudfpshandler
- 
- # ---------------------------------------------------------------------------
- # Gatekeeper / keymaster / keymint
-@@ -435,7 +442,18 @@ PRODUCT_PACKAGES += \
+@@ -439,7 +442,18 @@ PRODUCT_PACKAGES += \
      android.frameworks.sensorservice@1.0.vendor \
      android.hardware.sensors-service.xiaomi-multihal \
      libsensorndkbridge \
@@ -140,7 +99,7 @@ index e826802..186e335 100644
  
  # ---------------------------------------------------------------------------
  # Thermal
-@@ -519,6 +537,15 @@ PRODUCT_PACKAGES += \
+@@ -523,6 +537,15 @@ PRODUCT_PACKAGES += \
      android.hardware.fastboot-service.example_recovery \
      fastbootd
  
@@ -156,7 +115,7 @@ index e826802..186e335 100644
  # ---------------------------------------------------------------------------
  # Uprev shims required by the vendor blobs on this platform
  # ---------------------------------------------------------------------------
-@@ -600,7 +627,8 @@ PRODUCT_PACKAGES += \
+@@ -604,7 +627,8 @@ PRODUCT_PACKAGES += \
  # ---------------------------------------------------------------------------
  PRODUCT_COPY_FILES += \
      $(LOCAL_PATH)/configs/idc/uinput-goodix.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/uinput-goodix.idc \
@@ -166,63 +125,6 @@ index e826802..186e335 100644
  
  # ---------------------------------------------------------------------------
  # Fingerprint
-diff --git a/lineage_zephyr.mk b/lineage_zephyr.mk
-index 9d07081..a1c2b9b 100644
---- a/lineage_zephyr.mk
-+++ b/lineage_zephyr.mk
-@@ -25,17 +25,46 @@ ifneq ($(TARGET_BUILD_VARIANT),user)
- WITH_ADB_INSECURE := true
- endif
- 
--# Inherit from LineageOS common configuration
-+# ---------------------------------------------------------------------------
-+# AxionOS device configuration
-+#
-+# These are read while the common config below is inherited (flags.mk,
-+# board/common.mk and version.mk), so they have to be set first.
-+# ---------------------------------------------------------------------------
-+AXION_MAINTAINER := uzbforce
-+AXION_PROCESSOR  := Snapdragon_6s_Gen2
-+
-+AXION_CAMERA_REAR_INFO  := 50
-+AXION_CAMERA_FRONT_INFO := 16
-+
-+# The panel has the local-HBM switch the FOD blob drives; the Goodix HAL arms
-+# it through the Xiaomi display-feature daemon (see the FOD patch in
-+# axionos_patches_zephyr). Expose the same switch to AxionParts.
-+HBM_SUPPORTED := true
-+HBM_NODE      := /sys/class/backlight/panel0-backlight/hbm_mode
-+
-+# Double-tap-to-wake is implemented by the QTI power HAL extension
-+# (power/power-mode.cpp, TARGET_TAP_TO_WAKE below); it does not use Axion's
-+# doze pulse helpers.
-+TARGET_NEEDS_DOZE_FIX := false
-+
-+# The kernel is the stock prebuilt: no in-tree Axion kernel modules can be
-+# loaded into it, and there is no ax_kernel_manager.xml for this device.
-+TARGET_SHIPS_AXION_KERNEL_MODULES := false
-+TARGET_SUPPORTS_KERNEL_MANAGER    := false
-+
-+# Keep libperfmgr enabled; set TARGET_DISABLES_LIBPERF := true to fall back.
-+TARGET_DISABLES_LIBPERF := false
-+
-+# No AxionFX on the first bring-up build.
-+TARGET_INCLUDE_AXFX := false
-+
-+# Inherit from LineageOS common configuration (AxionOS' base)
- $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
- 
- # Inherit the hardware configuration for the actual device
- $(call inherit-product, device/xiaomi/zephyr/device.mk)
- 
--# Google apps. MindTheGapps is the package the LineageOS wiki points Android 16
--# users at; vendor/gapps is the same project's inline-build tree, so the OTA
--# ships GMS/Play Store/SetupWizard instead of asking for a separate sideload.
--$(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)
--
- # Signing keys, when present
- -include vendor/lineage-priv/keys/keys.mk
- 
 diff --git a/overlay/FrameworksResCommon/res/values/config.xml b/overlay/FrameworksResCommon/res/values/config.xml
 index 42d7287..a2758a5 100644
 --- a/overlay/FrameworksResCommon/res/values/config.xml
@@ -894,32 +796,6 @@ index 0000000..729fcb0
 +#     tcontext=u:object_r:sysfs_batteryinfo:s0 tclass=file
 +allow hal_camera_default sysfs_batteryinfo:file r_file_perms;
 +allow vendor_hal_perf_default sysfs_batteryinfo:file r_file_perms;
-diff --git a/sepolicy/vendor/cam_perfopt_zephyr.te b/sepolicy/vendor/cam_perfopt_zephyr.te
-new file mode 100644
-index 0000000..19d7175
---- /dev/null
-+++ b/sepolicy/vendor/cam_perfopt_zephyr.te
-@@ -0,0 +1,20 @@
-+#
-+# SPDX-FileCopyrightText: The LineageOS Project
-+# SPDX-License-Identifier: Apache-2.0
-+#
-+
-+# /vendor/bin/init.qti.cam.perfopt.sh is executed by init when the camera
-+# provider starts. It shipped as a plain vendor_file, which init is never
-+# allowed to execute:
-+#
-+#   avc: denied { execute } for comm="init" name="init.qti.cam.perfopt.sh"
-+#     scontext=u:r:init:s0 tcontext=u:object_r:vendor_file:s0 tclass=file
-+#
-+# The script is closed source and its full sysfs surface is unknown, so keep the
-+# domain permissive: it restores the camera performance knobs without risking a
-+# boot-time denial loop.
-+type vendor_qti_cam_perfopt, domain;
-+type vendor_qti_cam_perfopt_exec, vendor_file_type, exec_type, file_type;
-+
-+init_daemon_domain(vendor_qti_cam_perfopt)
-+permissive vendor_qti_cam_perfopt;
 diff --git a/sepolicy/vendor/file.te b/sepolicy/vendor/file.te
 index 1f2ca8c..2e8170b 100644
 --- a/sepolicy/vendor/file.te
@@ -939,10 +815,10 @@ index 1f2ca8c..2e8170b 100644
  # (gf_cali_persist.so and its backup) and the pointer to the file is handed to
  # the fingerprint TA. The TEE daemon reads the file on the TA's behalf, so both
 diff --git a/sepolicy/vendor/file_contexts b/sepolicy/vendor/file_contexts
-index 1eaed4b..fb141b1 100644
+index 1eaed4b..479ed06 100644
 --- a/sepolicy/vendor/file_contexts
 +++ b/sepolicy/vendor/file_contexts
-@@ -68,3 +68,23 @@
+@@ -68,3 +68,24 @@
  # the domain with seclabel, but labeling the binary keeps the normal
  # init_daemon_domain transition available as well.
  /(vendor|system/vendor)/bin/hw/vendor\.xiaomi\.hardware\.batteryantiaging-service u:object_r:hal_batteryantiaging_default_exec:s0
@@ -962,10 +838,11 @@ index 1eaed4b..fb141b1 100644
 +# ran. Label it with the platform NFC type; the NFC HAL already owns it.
 +/dev/tms_nfc     u:object_r:nfc_device:s0
 +
-+# Xiaomi's camera perf-optimisation script. init executes it from the camera
-+# provider's init sequence; unlabelled it is vendor_file and init may not
-+# execute it (avc denied { execute } for name="init.qti.cam.perfopt.sh").
-+/(vendor|system/vendor)/bin/init\.qti\.cam\.perfopt\.sh u:object_r:vendor_qti_cam_perfopt_exec:s0
++# Xiaomi's camera perf-optimisation script. The camera provider's init sequence
++# execs it with an explicit vendor_qti_init_shell seclabel, so it must carry
++# QTI's init-shell exec type: init may execute it, and the entrypoint check
++# passes for the domain the rc selects.
++/(vendor|system/vendor)/bin/init\.qti\.cam\.perfopt\.sh u:object_r:vendor_qti_init_shell_exec:s0
 diff --git a/sepolicy/vendor/genfs_contexts b/sepolicy/vendor/genfs_contexts
 index 5acac45..d65e0ec 100644
 --- a/sepolicy/vendor/genfs_contexts
@@ -1016,10 +893,10 @@ index 61f9b07..006c8d1 100644
 +# diagnostics (write /dev/kmsg). Without this only the kmsg logging is lost.
 +allow hal_batteryantiaging_default kmsg_device:chr_file { getattr write };
 diff --git a/sepolicy/vendor/hal_camera_default.te b/sepolicy/vendor/hal_camera_default.te
-index 5e64255..b56abc3 100644
+index 5e64255..5c95eed 100644
 --- a/sepolicy/vendor/hal_camera_default.te
 +++ b/sepolicy/vendor/hal_camera_default.te
-@@ -4,4 +4,10 @@
+@@ -4,4 +4,14 @@
  
  allow hal_camera_default mnt_vendor_file:dir search;
  allow hal_camera_default sysfs:file rw_file_perms;
@@ -1030,6 +907,10 @@ index 5e64255..b56abc3 100644
 +# though the HAL only wants the directory listing. Traversal only, no reads.
 +allow hal_camera_default sysfs_batteryinfo:dir search;
  allow hal_camera_default vendor_default_prop:property_service set;
++
++# The provider publishes vendor.camera.vm.status/dropcache for the camera
++# perf-optimisation script and the init rc, which now have their own type.
++set_prop(hal_camera_default, vendor_camera_vm_prop);
 diff --git a/sepolicy/vendor/hal_displayfeature_xiaomi_default.te b/sepolicy/vendor/hal_displayfeature_xiaomi_default.te
 index a4114bc..eae74eb 100644
 --- a/sepolicy/vendor/hal_displayfeature_xiaomi_default.te
@@ -1167,10 +1048,10 @@ index 66bf4c6..24e0179 100644
 +allow mi_thermald sysfs:dir { getattr open read search };
 diff --git a/sepolicy/vendor/property.te b/sepolicy/vendor/property.te
 new file mode 100644
-index 0000000..1475cf1
+index 0000000..6982997
 --- /dev/null
 +++ b/sepolicy/vendor/property.te
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,28 @@
 +# Xiaomi fingerprint properties. Stock maps persist.vendor.sys.fp.* to
 +# vendor_fp_prop; AOSP's default vendor_system_prop mapping makes vendor_init
 +# refuse to load the FOD geometry from /vendor/build.prop:
@@ -1193,15 +1074,23 @@ index 0000000..1475cf1
 +# the HAL needs set access in addition to the read access above.
 +set_prop(hal_fingerprint_default, vendor_fp_prop)
 +set_prop(hal_fingerprint_default, vendor_fp_info_prop)
++
++# The camera perf-optimisation script stores the pre-camera VM tunables in
++# vendor.camera.vm.* properties. vendor_default_prop may only be set by init
++# and vendor_init (neverallow in domain.te), so give these names their own
++# type and let the camera provider and QTI's init shell write them.
++type vendor_camera_vm_prop, property_type;
 diff --git a/sepolicy/vendor/property_contexts b/sepolicy/vendor/property_contexts
 new file mode 100644
-index 0000000..0870152
+index 0000000..6a7ab39
 --- /dev/null
 +++ b/sepolicy/vendor/property_contexts
-@@ -0,0 +1,3 @@
+@@ -0,0 +1,5 @@
 +persist.vendor.sys.fp.        u:object_r:vendor_fp_prop:s0
 +persist.vendor.sys.fp.info    u:object_r:vendor_fp_info_prop:s0
 +persist.vendor.sys.fp.uid     u:object_r:vendor_fp_info_prop:s0
++
++vendor.camera.vm.             u:object_r:vendor_camera_vm_prop:s0
 diff --git a/sepolicy/vendor/vendor_init_zephyr.te b/sepolicy/vendor/vendor_init_zephyr.te
 new file mode 100644
 index 0000000..3fda0f0
@@ -1240,10 +1129,10 @@ index 0000000..3fda0f0
 +allow vendor_init sysfs_zephyr_nfc_chip_name:file { getattr setattr };
 diff --git a/sepolicy/vendor/vendor_qti_init_shell_zephyr.te b/sepolicy/vendor/vendor_qti_init_shell_zephyr.te
 new file mode 100644
-index 0000000..c35af6c
+index 0000000..f30501d
 --- /dev/null
 +++ b/sepolicy/vendor/vendor_qti_init_shell_zephyr.te
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,34 @@
 +#
 +# SPDX-FileCopyrightText: The LineageOS Project
 +# SPDX-License-Identifier: Apache-2.0
@@ -1268,6 +1157,16 @@ index 0000000..c35af6c
 +allow vendor_qti_init_shell proc_page_cluster:file w_file_perms;
 +allow vendor_qti_init_shell vendor_sysfs_qdss_dev:file w_file_perms;
 +allow vendor_qti_init_shell configfs:dir w_dir_perms;
++
++# The camera perf-optimisation script (init.qti.cam.perfopt.sh) is executed
++# with this domain by the camera provider rc. QTI allows the shell to write the
++# watermark tunable but not to read it back before saving it, and grants no
++# access to drop_caches at all.
++allow vendor_qti_init_shell proc_watermark_scale_factor:file r_file_perms;
++allow vendor_qti_init_shell proc_drop_caches:file w_file_perms;
++
++# Its swappiness/watermark backups live in vendor.camera.vm.*; see property.te.
++set_prop(vendor_qti_init_shell, vendor_camera_vm_prop);
 diff --git a/sepolicy/vendor/vendor_sensors.te b/sepolicy/vendor/vendor_sensors.te
 index e66a0ba..13a75d9 100644
 --- a/sepolicy/vendor/vendor_sensors.te
